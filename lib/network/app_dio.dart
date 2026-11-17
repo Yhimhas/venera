@@ -356,12 +356,49 @@ class RHttpAdapter implements HttpClientAdapter {
       headers[key]!.add(entry.$2);
     }
     return ResponseBody(
-      res.body,
+      cancelToken == null ? res.body : _cancelableBody(res.body, cancelToken),
       res.statusCode,
       statusMessage: _getStatusMessage(res.statusCode),
       isRedirect: false,
       headers: headers,
     );
+  }
+
+  static Stream<Uint8List> _cancelableBody(
+    Stream<Uint8List> body,
+    rhttp.CancelToken cancelToken,
+  ) {
+    late final StreamSubscription<Uint8List> upstream;
+    var detached = false;
+    var finished = false;
+    late final StreamController<Uint8List> response;
+    response = StreamController<Uint8List>(
+      onListen: () {
+        upstream = body.listen(
+          (chunk) {
+            if (!detached) response.add(chunk);
+          },
+          onError: (Object error, StackTrace stack) {
+            if (!detached) response.addError(error, stack);
+          },
+          onDone: () {
+            finished = true;
+            unawaited(response.close());
+          },
+        );
+      },
+      onPause: () => upstream.pause(),
+      onResume: () => upstream.resume(),
+      onCancel: () {
+        if (finished) return;
+        detached = true;
+        // Keep the native response subscribed until rhttp sends its terminal
+        // event. Dio may detach before the native cancellation completes.
+        cancelToken.cancel().ignore();
+        upstream.resume();
+      },
+    );
+    return response.stream;
   }
 
   static String _getStatusMessage(int statusCode) {

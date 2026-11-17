@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:isolate';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/widgets.dart' show ChangeNotifier;
 import 'package:flutter_saf/flutter_saf.dart';
 import 'package:venera/foundation/app.dart';
@@ -668,6 +670,19 @@ class ArchiveDownloadTask extends DownloadTask {
   }
 
   FileDownloader? _downloader;
+  Future<void>? _run;
+  int _runId = 0;
+  bool _discarded = false;
+  bool _archiveReady = false;
+  late final _archiveFile = File(
+    FilePath.join(
+      App.dataPath,
+      'archive-downloads',
+      '${sha256.convert(utf8.encode(jsonEncode([source.key, comic.id, archiveUrl])))}.zip',
+    ),
+  );
+
+  bool _isCurrent(int runId) => _isRunning && _runId == runId;
 
   String _message = "Fetching comic info...";
 
@@ -678,6 +693,7 @@ class ArchiveDownloadTask extends DownloadTask {
   void _setError(String message) {
     _isRunning = false;
     _isError = true;
+    _speed = 0;
     _message = message;
     notifyListeners();
     Log.error("Download", message);
@@ -685,10 +701,17 @@ class ArchiveDownloadTask extends DownloadTask {
 
   @override
   void cancel() async {
+    if (_discarded) return;
+    _discarded = true;
+    ++_runId;
     _isRunning = false;
     await _downloader?.stop();
+    await _run;
+    await _archiveFile.deleteIgnoreError();
+    await File('${_archiveFile.path}.download').deleteIgnoreError();
+    await File('${_archiveFile.path}.download.tmp').deleteIgnoreError();
     if (path != null) {
-      Directory(path!).deleteIgnoreError(recursive: true);
+      await Directory(path!).deleteIgnoreError(recursive: true);
     }
     path = null;
     LocalManager().removeTask(this);
@@ -720,8 +743,10 @@ class ArchiveDownloadTask extends DownloadTask {
 
   @override
   void pause() {
+    ++_runId;
     _isRunning = false;
     _message = "Paused";
+    _speed = 0;
     _downloader?.stop();
     notifyListeners();
   }
@@ -731,92 +756,94 @@ class ArchiveDownloadTask extends DownloadTask {
       _expectedBytes == 0 ? 0 : _currentBytes / _expectedBytes;
 
   @override
-  void resume() async {
-    if (_isRunning) {
+  void resume() {
+    if (_isRunning || _discarded) {
       return;
     }
+    final runId = ++_runId;
     _isError = false;
     _isRunning = true;
-    notifyListeners();
     _message = "Downloading...";
+    final previous = _run;
+    _run = _runArchive(runId, previous);
+    notifyListeners();
+  }
 
-    if (path == null) {
-      var dir = await LocalManager().findValidDirectory(
-        comic.id,
-        comicType,
-        comic.title,
-      );
-      if (!(await dir.exists())) {
-        try {
+  Future<void> _runArchive(int runId, Future<void>? previous) async {
+    try {
+      await previous;
+      if (!_isCurrent(runId)) return;
+
+      if (path == null) {
+        final dir = await LocalManager().findValidDirectory(
+          comic.id,
+          comicType,
+          comic.title,
+        );
+        path = dir.path;
+        if (!(await dir.exists())) {
           await dir.create();
-        } catch (e) {
-          _setError("Error: $e");
-          return;
         }
       }
-      path = dir.path;
-    }
+      if (!_isCurrent(runId)) return;
 
-    var archiveFile =
-        File(FilePath.join(App.dataPath, "archive_downloading.zip"));
-
-    Log.info("Download", "Downloading $archiveUrl");
-
-    _downloader = FileDownloader(
-      archiveUrl,
-      archiveFile.path,
-      sourceKey: source.key,
-    );
-
-    bool isDownloaded = false;
-
-    try {
-      await for (var status in _downloader!.start()) {
-        _currentBytes = status.downloadedBytes;
-        _expectedBytes = status.totalBytes;
-        _message =
-            "${bytesToReadableString(_currentBytes)}/${bytesToReadableString(_expectedBytes)}";
-        _speed = status.bytesPerSecond;
-        isDownloaded = status.isFinished;
-        notifyListeners();
+      if (!_archiveReady || !await _archiveFile.exists()) {
+        if (!_isCurrent(runId)) return;
+        _archiveReady = false;
+        Log.info("Download", "Downloading $archiveUrl");
+        final downloader = _downloader = FileDownloader(
+          archiveUrl,
+          _archiveFile.path,
+          sourceKey: source.key,
+        );
+        await for (final status in downloader.start()) {
+          if (status.isFinished) _archiveReady = true;
+          if (!_isCurrent(runId)) return;
+          _currentBytes = status.downloadedBytes;
+          _expectedBytes = status.totalBytes;
+          _message =
+              "${bytesToReadableString(_currentBytes)}/${bytesToReadableString(_expectedBytes)}";
+          _speed = status.bytesPerSecond;
+          notifyListeners();
+        }
       }
+      if (!_isCurrent(runId)) return;
+      if (!_archiveReady) {
+        _setError("Error: Download failed");
+        return;
+      }
+
+      try {
+        await _extractArchive(_archiveFile.path, path!);
+      } catch (e) {
+        if (_isCurrent(runId)) _setError("Failed to extract archive: $e");
+        return;
+      }
+      if (!_isCurrent(runId)) return;
+      LocalManager().completeTask(this);
+      _isRunning = false;
+      await _archiveFile.deleteIgnoreError();
     } catch (e) {
-      _setError("Error: $e");
-      return;
+      if (_isCurrent(runId)) _setError("Error: $e");
+    } finally {
+      _downloader = null;
     }
-
-    if (!_isRunning) {
-      return;
-    }
-
-    if (!isDownloaded) {
-      _setError("Error: Download failed");
-      return;
-    }
-
-    try {
-      await _extractArchive(archiveFile.path, path!);
-    } catch (e) {
-      _setError("Failed to extract archive: $e");
-      return;
-    }
-
-    await archiveFile.deleteIgnoreError();
-
-    LocalManager().completeTask(this);
   }
 
   static Future<void> _extractArchive(String archive, String outDir) async {
     var out = Directory(outDir);
     if (out is AndroidDirectory) {
       // Saf directory can't be accessed by native code.
-      var cacheDir = FilePath.join(App.cachePath, "archive_downloading");
-      Directory(cacheDir).forceCreateSync();
-      await Isolate.run(() {
-        ZipFile.openAndExtract(archive, cacheDir);
-      });
-      await copyDirectoryIsolate(Directory(cacheDir), Directory(outDir));
-      await Directory(cacheDir).deleteIgnoreError(recursive: true);
+      final temporary = await Directory(App.cachePath).createTemp('archive-');
+      final cacheDir = temporary.path;
+      try {
+        await Isolate.run(() {
+          ZipFile.openAndExtract(archive, cacheDir);
+        });
+        await copyDirectoryIsolate(temporary, out);
+      } finally {
+        await temporary.deleteIgnoreError(recursive: true);
+      }
     } else {
       await Isolate.run(() {
         ZipFile.openAndExtract(archive, outDir);
