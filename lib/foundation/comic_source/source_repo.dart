@@ -11,7 +11,12 @@ class SourceRepoIndex {
   /// The decoded index.json content.
   final List<dynamic> data;
 
-  const SourceRepoIndex(this.url, this.data);
+  /// Whether [url] differs from the configured url because the configured one
+  /// failed. A mirror can also win the race while the configured url still
+  /// works (it is just slower), and then the configured url must be kept.
+  final bool switched;
+
+  const SourceRepoIndex(this.url, this.data, {this.switched = false});
 }
 
 /// Helper for loading the comic source repository (index.json and source
@@ -93,10 +98,18 @@ class SourceRepo {
       throw Exception("Invalid repository url");
     }
     final completer = Completer<SourceRepoIndex>();
+    final configuredDone = Completer<void>();
     var pending = urls.length;
+    var configuredFailed = false;
     Object? lastError;
 
-    void onError(Object error) {
+    void onError(String candidate, Object error) {
+      if (candidate == urls.first) {
+        configuredFailed = true;
+        if (!configuredDone.isCompleted) {
+          configuredDone.complete();
+        }
+      }
       lastError = error;
       pending--;
       if (pending == 0 && !completer.isCompleted) {
@@ -107,21 +120,42 @@ class SourceRepo {
     for (final u in urls) {
       () async {
         try {
-          final data = await _fetchIndex(u);
+          final data = await _fetchIndexExact(u);
+          if (u == urls.first && !configuredDone.isCompleted) {
+            configuredDone.complete();
+          }
           if (!completer.isCompleted) {
-            completer.complete(SourceRepoIndex(u, data));
+            completer.complete(
+              SourceRepoIndex(u, data, switched: configuredFailed),
+            );
           }
         } catch (e) {
-          onError(e);
+          onError(u, e);
         }
       }();
     }
 
-    return completer.future;
+    // Give the configured url a moment to report its own failure, so a mirror
+    // which merely answered faster does not get persisted as the repository.
+    var result = await completer.future;
+    if (result.url != urls.first && !configuredDone.isCompleted) {
+      await Future.any([
+        Future.delayed(const Duration(seconds: 2)),
+        configuredDone.future,
+      ]);
+    }
+    if (result.url != urls.first) {
+      result = SourceRepoIndex(
+        result.url,
+        result.data,
+        switched: configuredFailed,
+      );
+    }
+    return result;
   }
 
-  static Future<List<dynamic>> _fetchIndex(String url) async {
-    final data = await fetchText(url);
+  static Future<List<dynamic>> _fetchIndexExact(String url) async {
+    final data = await _getTextExact(url);
     final decoded = jsonDecode(data);
     if (decoded is! List) {
       throw Exception("Invalid index.json");
@@ -138,7 +172,7 @@ class SourceRepo {
     Object? lastError;
     for (final u in urls) {
       try {
-        return await _getText(u);
+        return await _getTextExact(u);
       } catch (e) {
         lastError = e;
       }
@@ -146,7 +180,7 @@ class SourceRepo {
     throw lastError ?? Exception("Network error");
   }
 
-  static Future<String> _getText(String url) async {
+  static Future<String> _getTextExact(String url) async {
     final res = await AppDio().get<String>(
       url,
       options: Options(

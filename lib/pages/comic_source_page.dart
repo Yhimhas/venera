@@ -369,7 +369,7 @@ class _ComicSourceListState extends State<_ComicSourceList> {
         json = result.data;
         _effectiveUrl = result.url;
       });
-      if (result.url != controller.text.trim()) {
+      if (result.switched) {
         controller.text = result.url;
         changed = true;
         setState(() {});
