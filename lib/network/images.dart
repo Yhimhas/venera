@@ -90,32 +90,44 @@ abstract class ImageDownloader {
     );
   }
 
-  static final _loadingImages = <String, _StreamWrapper<ImageDownloadProgress>>{};
+  static final _loadingImages = <String, _ImageLoad>{};
 
   /// Cancel all loading images.
   static void cancelAllLoadingImages() {
-    for (var wrapper in _loadingImages.values) {
-      wrapper.cancel();
-    }
+    final downloads = _loadingImages.values.toList();
     _loadingImages.clear();
+    for (final download in downloads) {
+      download.cancel();
+    }
   }
 
   /// Load a comic image from the network or cache.
   /// The function will prevent multiple requests for the same image.
   static Stream<ImageDownloadProgress> loadComicImage(
       String imageKey, String? sourceKey, String cid, String eid) {
+    return _startComicImage(imageKey, sourceKey, cid, eid).stream;
+  }
+
+  static void preloadComicImage(
+      String imageKey, String? sourceKey, String cid, String eid) {
+    _startComicImage(imageKey, sourceKey, cid, eid);
+  }
+
+  static _ImageLoad _startComicImage(
+      String imageKey, String? sourceKey, String cid, String eid) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-    if (_loadingImages.containsKey(cacheKey)) {
-      return _loadingImages[cacheKey]!.stream;
-    }
-    final stream = _StreamWrapper<ImageDownloadProgress>(
-      _loadComicImage(imageKey, sourceKey, cid, eid),
-      (wrapper) {
-        _loadingImages.remove(cacheKey);
-      },
-    );
-    _loadingImages[cacheKey] = stream;
-    return stream.stream;
+    return _loadingImages.putIfAbsent(cacheKey, () {
+      final token = CancelToken();
+      return _ImageLoad(
+        _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken: token),
+        token,
+        (download) {
+          if (identical(_loadingImages[cacheKey], download)) {
+            _loadingImages.remove(cacheKey);
+          }
+        },
+      );
+    });
   }
 
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
@@ -124,7 +136,12 @@ abstract class ImageDownloader {
   }
 
   static Stream<ImageDownloadProgress> _loadComicImage(
-      String imageKey, String? sourceKey, String cid, String eid) async* {
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid, {
+    CancelToken? cancelToken,
+  }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final cache = await CacheManager().findCache(cacheKey);
 
@@ -171,8 +188,11 @@ abstract class ImageDownloader {
           extra: {proxySourceKey: sourceKey},
         ));
 
-        var req = await dio.request<ResponseBody>(configs['url'] ?? imageKey,
-            data: configs['data']);
+        var req = await dio.request<ResponseBody>(
+          configs['url'] ?? imageKey,
+          data: configs['data'],
+          cancelToken: cancelToken,
+        );
         var stream = req.data?.stream ?? (throw "Error: Empty response body.");
         int? expectedBytes = req.data!.contentLength;
         if (expectedBytes == -1) {
@@ -216,6 +236,7 @@ abstract class ImageDownloader {
           data = newData;
         }
 
+        if (cancelToken?.isCancelled == true) return;
         await CacheManager().writeCache(cacheKey, data);
         yield ImageDownloadProgress(
           currentBytes: data.length,
@@ -224,7 +245,9 @@ abstract class ImageDownloader {
         );
         return;
       } catch (e) {
-        if (retryLimit < 0 || onLoadFailed == null) {
+        if (cancelToken?.isCancelled == true ||
+            retryLimit < 0 ||
+            onLoadFailed == null) {
           rethrow;
         }
         var newConfig = await onLoadFailed();
@@ -244,71 +267,64 @@ abstract class ImageDownloader {
   }
 }
 
-/// A wrapper class for a stream that
-/// allows multiple listeners to listen to the same stream.
-class _StreamWrapper<T> {
-  final Stream<T> _stream;
-
-  final List<StreamController> controllers = [];
-
-  final void Function(_StreamWrapper<T> wrapper) onClosed;
-
-  bool isClosed = false;
-
-  _StreamWrapper(this._stream, this.onClosed) {
-    _listen();
+/// Shares one eager image download with reader and prefetch callers.
+class _ImageLoad {
+  _ImageLoad(Stream<ImageDownloadProgress> source, this._token, this._onClosed) {
+    _subscription = source.listen(
+      (progress) {
+        if (progress.imageBytes != null) {
+          _availableImage = progress;
+        }
+        for (final listener in _listeners) {
+          listener.add(progress);
+        }
+      },
+      onError: _fail,
+      onDone: _close,
+      cancelOnError: true,
+    );
   }
 
-  void _listen() async {
-    try {
-      await for (var data in _stream) {
-        if (isClosed) {
-          break;
-        }
-        for (var controller in controllers) {
-          if (!controller.isClosed) {
-            controller.add(data);
-          }
-        }
-      }
-    }
-    catch (e) {
-      for (var controller in controllers) {
-        if (!controller.isClosed) {
-          controller.addError(e);
-        }
-      }
-    }
-    finally {
-      for (var controller in controllers) {
-        if (!controller.isClosed) {
-          controller.close();
-        }
-      }
-    }
-    controllers.clear();
-    isClosed = true;
-    onClosed(this);
+  final CancelToken _token;
+  final void Function(_ImageLoad) _onClosed;
+  final _listeners = <StreamController<ImageDownloadProgress>>{};
+  late final StreamSubscription<ImageDownloadProgress> _subscription;
+  ImageDownloadProgress? _availableImage;
+  bool _closed = false;
+
+  Stream<ImageDownloadProgress> get stream {
+    final listener = StreamController<ImageDownloadProgress>();
+    listener.onCancel = () => _listeners.remove(listener);
+    _listeners.add(listener);
+    final image = _availableImage;
+    if (image != null) listener.add(image);
+    return listener.stream;
   }
 
-  Stream<T> get stream {
-    if (isClosed) {
-      throw Exception('Stream is closed');
+  void _fail(Object error, StackTrace stackTrace) {
+    for (final listener in _listeners) {
+      listener.addError(error, stackTrace);
     }
-    var controller = StreamController<T>();
-    controllers.add(controller);
-    controller.onCancel = () {
-      controllers.remove(controller);
-    };
-    return controller.stream;
+    _close();
+  }
+
+  void _close() {
+    if (_closed) return;
+    _closed = true;
+    _onClosed(this);
+    _availableImage = null;
+    final listeners = _listeners.toList();
+    _listeners.clear();
+    for (final listener in listeners) {
+      unawaited(listener.close());
+    }
   }
 
   void cancel() {
-    for (var controller in controllers) {
-      controller.close();
-    }
-    controllers.clear();
-    isClosed = true;
+    if (_closed) return;
+    _token.cancel('Comic image load cancelled');
+    _fail(_token.cancelError!, StackTrace.current);
+    _subscription.cancel().ignore();
   }
 }
 

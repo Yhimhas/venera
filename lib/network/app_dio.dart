@@ -327,11 +327,17 @@ class RHttpAdapter implements HttpClientAdapter {
             uri: options.uri,
             sourceKey: options.extra[proxySourceKey] as String?,
           );
-    var res = await (await _getClient(proxy)).request(
+    final client = await _getClient(proxy);
+    final cancelToken = cancelFuture == null ? null : rhttp.CancelToken();
+    if (cancelToken != null) {
+      cancelFuture!.then((_) => cancelToken.cancel()).ignore();
+    }
+    var res = await client.request(
       method: rhttp.HttpMethod(options.method),
       url: options.uri.toString(),
       expectBody: rhttp.HttpExpectBody.stream,
       body: requestStream == null ? null : rhttp.HttpBody.stream(requestStream),
+      cancelToken: cancelToken,
       headers: rhttp.HttpHeaders.rawMap(
         Map.fromEntries(
           options.headers.entries.map(

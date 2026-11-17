@@ -1259,7 +1259,7 @@ void _preDownloadImage(int page, BuildContext context) {
   var cid = reader.cid;
   var eid = reader.eid;
   var sourceKey = reader.type.comicSource?.key;
-  ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
+  ImageDownloader.preloadComicImage(imageKey, sourceKey, cid, eid);
 }
 
 class _SwipeChangeChapterProgress extends StatefulWidget {

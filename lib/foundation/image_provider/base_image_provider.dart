@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui show Codec;
 import 'dart:ui';
+import 'package:dio/dio.dart' show CancelToken, DioException;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -75,6 +76,9 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
         } on _ImageLoadingStopException {
           rethrow;
         } catch (e) {
+          if (e is DioException && CancelToken.isCancel(e)) {
+            throw const _ImageLoadingStopException();
+          }
           if (e.toString().contains("Invalid Status Code: 404")) {
             rethrow;
           }
