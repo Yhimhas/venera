@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dio/io.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/proxy.dart';
 import 'package:venera/utils/ext.dart';
@@ -10,8 +9,14 @@ class FileDownloader {
   final String url;
   final String savePath;
   final int maxConcurrent;
+  final String? sourceKey;
 
-  FileDownloader(this.url, this.savePath, {this.maxConcurrent = 4});
+  FileDownloader(
+    this.url,
+    this.savePath, {
+    this.maxConcurrent = 4,
+    this.sourceKey,
+  });
 
   int _currentBytes = 0;
 
@@ -19,7 +24,8 @@ class FileDownloader {
 
   late int _fileSize;
 
-  final _dio = Dio();
+  late final _dio = Dio(BaseOptions(extra: {proxySourceKey: sourceKey}))
+    ..httpClientAdapter = RHttpAdapter();
 
   RandomAccessFile? _file;
 
@@ -106,14 +112,6 @@ class FileDownloader {
 
   void _download(StreamController<DownloadingStatus> resultStream) async {
     try {
-      var proxy = await getProxy();
-      _dio.httpClientAdapter = IOHttpClientAdapter(
-        createHttpClient: () {
-          return HttpClient()
-            ..findProxy = (uri) => proxy == null ? "DIRECT" : "PROXY $proxy";
-        },
-      );
-
       // get file size
       await _createTasks();
 

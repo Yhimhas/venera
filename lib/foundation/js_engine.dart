@@ -214,26 +214,44 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
   Future<Map<String, dynamic>> _http(Map<String, dynamic> req) async {
     Response? response;
     String? error;
+    Dio? temporaryDio;
 
     try {
       var headers = Map<String, dynamic>.from(req["headers"] ?? {});
       var extra = Map<String, dynamic>.from(req["extra"] ?? {});
+      final sourceKey = req['sourceKey'] is String
+          ? req['sourceKey'] as String
+          : null;
+      extra[proxySourceKey] = sourceKey;
+      extra.remove(resolvedProxyKey);
       if (headers["user-agent"] == null && headers["User-Agent"] == null) {
         headers["User-Agent"] = webUA;
       }
       var dio = _dio;
       if (headers['http_client'] == "dart:io") {
-        dio = Dio(BaseOptions(
+        temporaryDio = Dio(BaseOptions(
           responseType: ResponseType.plain,
           validateStatus: (status) => true,
         ));
-        var proxy = await getProxy();
-        dio.httpClientAdapter = IOHttpClientAdapter(
-          createHttpClient: () {
-            return HttpClient()
-              ..findProxy = (uri) => proxy == null ? "DIRECT" : "PROXY $proxy";
-          },
+        dio = temporaryDio;
+        final proxy = await getProxy(
+          uri: Uri.parse(req['url'] as String),
+          sourceKey: sourceKey,
         );
+        final proxyUri = proxy == null ? null : Uri.parse(proxy);
+        if (proxyUri != null &&
+            (proxyUri.scheme != 'http' || proxyUri.userInfo.isNotEmpty)) {
+          // dart:io's proxy directive supports plain HTTP proxies.
+          extra[resolvedProxyKey] = proxy;
+          dio.httpClientAdapter = RHttpAdapter();
+        } else {
+          final directive = proxyUri == null
+              ? 'DIRECT'
+              : 'PROXY ${proxyUri.authority}${proxyUri.hasPort ? '' : ':80'}';
+          dio.httpClientAdapter = IOHttpClientAdapter(
+            createHttpClient: () => HttpClient()..findProxy = (_) => directive,
+          );
+        }
         dio.interceptors
             .add(CookieManagerSql(SingleInstanceCookieJar.instance!));
         dio.interceptors.add(LogInterceptor());
@@ -251,6 +269,8 @@ class JsEngine with _JSEngineApi, JsUiApi, Init {
       );
     } catch (e) {
       error = e.toString();
+    } finally {
+      temporaryDio?.close();
     }
 
     Map<String, String> headers = {};

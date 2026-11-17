@@ -196,37 +196,61 @@ class AppDio with DioMixin {
 }
 
 class RHttpAdapter implements HttpClientAdapter {
-  /// `rhttp.Rhttp.request(settings: ...)` builds a brand new native client for
-  /// every request, and a native client owns the connection pool and the TLS
-  /// session cache. Doing that per request means a full TCP + TLS handshake for
-  /// every single request, which is very expensive on filtered networks where
-  /// handshakes are also the first thing to be reset.
-  ///
-  /// So one client is kept here and shared by every request; it is rebuilt only
-  /// when a setting which affects it changes.
-  static rhttp.RhttpClient? _client;
-
-  static String? _clientKey;
-
-  static Future<rhttp.RhttpClient>? _pendingClient;
+  // The native client owns the connection pool and TLS sessions. Cache its
+  // creation too, so concurrent requests for one route share the same client.
+  static const _maxClients = 16;
+  static final _clients =
+      <(String?, bool, bool, String), Future<rhttp.RhttpClient>>{};
 
   Future<rhttp.ClientSettings> get settings async {
     return _buildSettings(await getProxy());
   }
 
-  static rhttp.ClientSettings _buildSettings(String? proxy) {
+  /// Check an unsaved proxy without touching the shared client or app settings.
+  static Future<int> probeProxy(String url, String proxy) async {
+    final client = await rhttp.RhttpClient.create(
+      settings: _buildSettings(
+        normalizeProxy(proxy),
+        timeouts: const rhttp.TimeoutSettings(
+          timeout: Duration(seconds: 15),
+          connectTimeout: Duration(seconds: 8),
+        ),
+      ),
+    );
+    try {
+      final response = await client.requestText(
+        method: rhttp.HttpMethod.get,
+        url: url,
+        headers: rhttp.HttpHeaders.rawMap({
+          'User-Agent': 'venera/v${App.version}',
+        }),
+      );
+      return response.statusCode;
+    } finally {
+      client.dispose();
+    }
+  }
+
+  static rhttp.ClientSettings _buildSettings(
+    String? proxy, {
+    rhttp.TimeoutSettings? timeouts,
+    Map<String, List<String>>? overrides,
+  }) {
     return rhttp.ClientSettings(
       proxySettings: proxy == null
           ? const rhttp.ProxySettings.noProxy()
           : rhttp.ProxySettings.proxy(proxy),
       redirectSettings: const rhttp.RedirectSettings.limited(5),
-      timeoutSettings: const rhttp.TimeoutSettings(
-        connectTimeout: Duration(seconds: 15),
-        keepAliveTimeout: Duration(seconds: 60),
-        keepAlivePing: Duration(seconds: 30),
-      ),
+      timeoutSettings: timeouts ??
+          const rhttp.TimeoutSettings(
+            connectTimeout: Duration(seconds: 15),
+            keepAliveTimeout: Duration(seconds: 60),
+            keepAlivePing: Duration(seconds: 30),
+          ),
       throwOnStatusCode: false,
-      dnsSettings: rhttp.DnsSettings.static(overrides: _getOverrides()),
+      dnsSettings: rhttp.DnsSettings.static(
+        overrides: overrides ?? _getOverrides(),
+      ),
       tlsSettings: rhttp.TlsSettings(
         sni: appdata.settings['sni'] != false,
         verifyCertificates: appdata.settings['ignoreBadCertificate'] != true,
@@ -234,53 +258,38 @@ class RHttpAdapter implements HttpClientAdapter {
     );
   }
 
-  /// Everything in [ClientSettings] which cannot change the meaning of an
-  /// already established connection is left out, so editing e.g. the timeout
-  /// does not throw the connection pool away.
-  static String _clientKeyOf(String? proxy) {
-    return [
-      proxy ?? '',
+  static Future<rhttp.RhttpClient> _getClient(String? proxy) async {
+    final overrides = _getOverrides();
+    final hosts = overrides.keys.toList()..sort();
+    final key = (
+      proxy,
       appdata.settings['sni'] != false,
       appdata.settings['ignoreBadCertificate'] != true,
-      _getOverrides().entries
-          .map((e) => "${e.key}=${e.value.join(',')}")
-          .join(';'),
-    ].join('|');
-  }
-
-  static Future<rhttp.RhttpClient> _getClient() async {
-    var proxy = await getProxy();
-    var key = _clientKeyOf(proxy);
-    var client = _client;
-    if (client != null && key == _clientKey) {
-      return client;
+      jsonEncode({for (final host in hosts) host: overrides[host]}),
+    );
+    final existing = _clients.remove(key);
+    final future = existing ??
+        rhttp.RhttpClient.create(
+          settings: _buildSettings(proxy, overrides: overrides),
+        );
+    _clients[key] = future;
+    if (_clients.length > _maxClients) {
+      // rhttp releases native references when collected. An evicted client
+      // may still be in use by a request that already selected it.
+      _clients.remove(_clients.keys.first);
     }
-    // Another request may be creating a client for the same settings.
-    var pending = _pendingClient;
-    if (pending != null) {
-      var created = await pending;
-      if (key == _clientKey) {
-        return created;
-      }
-    }
-    var future = rhttp.RhttpClient.create(settings: _buildSettings(proxy));
-    _pendingClient = future;
     try {
-      var created = await future;
-      var old = _client;
-      _client = created;
-      _clientKey = key;
-      old?.dispose();
-      return created;
-    } finally {
-      if (identical(_pendingClient, future)) {
-        _pendingClient = null;
+      return await future;
+    } catch (_) {
+      if (identical(_clients[key], future)) {
+        _clients.remove(key);
       }
+      rethrow;
     }
   }
 
   static Map<String, List<String>> _getOverrides() {
-    if (!appdata.settings['enableDnsOverrides'] == true) {
+    if (appdata.settings['enableDnsOverrides'] != true) {
       return {};
     }
     var config = appdata.settings["dnsOverrides"];
@@ -312,7 +321,13 @@ class RHttpAdapter implements HttpClientAdapter {
       options.headers['User-Agent'] = "venera/v${App.version}";
     }
 
-    var res = await (await _getClient()).request(
+    final proxy = options.extra.containsKey(resolvedProxyKey)
+        ? options.extra[resolvedProxyKey] as String?
+        : await getProxy(
+            uri: options.uri,
+            sourceKey: options.extra[proxySourceKey] as String?,
+          );
+    var res = await (await _getClient(proxy)).request(
       method: rhttp.HttpMethod(options.method),
       url: options.uri.toString(),
       expectBody: rhttp.HttpExpectBody.stream,

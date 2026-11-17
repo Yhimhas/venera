@@ -762,7 +762,11 @@ class ArchiveDownloadTask extends DownloadTask {
 
     Log.info("Download", "Downloading $archiveUrl");
 
-    _downloader = FileDownloader(archiveUrl, archiveFile.path);
+    _downloader = FileDownloader(
+      archiveUrl,
+      archiveFile.path,
+      sourceKey: source.key,
+    );
 
     bool isDownloaded = false;
 

@@ -213,6 +213,8 @@ class Settings with ChangeNotifier {
     'onClickFavorite': 'viewDetail', // viewDetail, read
     'enableDnsOverrides': false,
     'dnsOverrides': {},
+    'sourceProxies': <String, String>{},
+    'domainProxies': <String, String>{},
     'enableCustomImageProcessing': false,
     'customImageProcessing': defaultCustomImageProcessing,
     'sni': true,

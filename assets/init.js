@@ -458,25 +458,17 @@ function Cookie({name, value, domain}) {
  * Network object for sending HTTP requests and managing cookies.
  * @namespace Network
  */
-let Network = {
-    /**
-     * Sends an HTTP request.
-     * @param {string} method - The HTTP method (e.g., GET, POST, PUT, PATCH, DELETE).
-     * @param {string} url - The URL to send the request to.
-     * @param {Object} headers - The headers to include in the request.
-     * @param data - The data to send with the request.
-     * @param {Object} extra - Extra options to pass to the interceptor.
-     * @returns {Promise<{status: number, headers: {}, body: ArrayBuffer}>} The response from the request.
-     */
-    async fetchBytes(method, url, headers, data, extra) {
+function _createNetwork(getSourceKey = () => null) {
+    async function sendRequest(method, url, headers, data, extra, bytes = false) {
         let result = await sendMessage({
             method: 'http',
             http_method: method,
-            bytes: true,
+            bytes: bytes,
             url: url,
             headers: headers,
             data: data,
             extra: extra,
+            sourceKey: getSourceKey(),
         });
 
         if (result.error) {
@@ -484,34 +476,20 @@ let Network = {
         }
 
         return result;
-    },
+    }
 
-    /**
-     * Sends an HTTP request.
-     * @param {string} method - The HTTP method (e.g., GET, POST, PUT, PATCH, DELETE).
-     * @param {string} url - The URL to send the request to.
-     * @param {Object} headers - The headers to include in the request.
-     * @param data - The data to send with the request.
-     * @param {Object} extra - Extra options to pass to the interceptor.
-     * @returns {Promise<{status: number, headers: {}, body: string}>} The response from the request.
-     */
-    async sendRequest(method, url, headers, data, extra) {
-        let result = await sendMessage({
-            method: 'http',
-            http_method: method,
-            url: url,
-            headers: headers,
-            data: data,
-            extra: extra,
-        });
+    return {
+        ..._networkMethods,
+        sendRequest(method, url, headers, data, extra) {
+            return sendRequest(method, url, headers, data, extra);
+        },
+        fetchBytes(method, url, headers, data, extra) {
+            return sendRequest(method, url, headers, data, extra, true);
+        },
+    };
+}
 
-        if (result.error) {
-            throw result.error;
-        }
-
-        return result;
-    },
-
+const _networkMethods = {
     /**
      * Sends an HTTP GET request.
      * @param {string} url - The URL to send the request to.
@@ -610,6 +588,8 @@ let Network = {
     },
 };
 
+let Network = _createNetwork();
+
 /**
  * [fetch] function for sending HTTP requests. Same api as the browser fetch.
  * @param url {string}
@@ -618,6 +598,10 @@ let Network = {
  * @since 1.2.0
  */
 async function fetch(url, options) {
+    return _fetchWithNetwork(Network, url, options);
+}
+
+async function _fetchWithNetwork(network, url, options) {
     let method = 'GET';
     let headers = {};
     let data = null;
@@ -628,7 +612,7 @@ async function fetch(url, options) {
         data = options.body || data;
     }
 
-    let result = await Network.fetchBytes(method, url, headers, data);
+    let result = await network.fetchBytes(method, url, headers, data);
 
     return {
         ok: result.status >= 200 && result.status < 300,

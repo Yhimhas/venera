@@ -8,6 +8,7 @@ import 'package:venera/foundation/consts.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
+import 'proxy.dart';
 
 abstract class ImageDownloader {
   static Stream<ImageDownloadProgress> loadThumbnail(
@@ -50,6 +51,7 @@ abstract class ImageDownloader {
       headers: Map<String, dynamic>.from(configs['headers']),
       method: configs['method'] ?? 'GET',
       responseType: ResponseType.stream,
+      extra: {proxySourceKey: sourceKey},
     ));
 
     String requestUrl = configs['url'] ?? url;
@@ -166,6 +168,7 @@ abstract class ImageDownloader {
           headers: configs['headers'],
           method: configs['method'] ?? 'GET',
           responseType: ResponseType.stream,
+          extra: {proxySourceKey: sourceKey},
         ));
 
         var req = await dio.request<ResponseBody>(configs['url'] ?? imageKey,

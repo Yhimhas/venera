@@ -1,9 +1,10 @@
 import 'dart:typed_data';
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/proxy.dart';
+
+typedef _CacheKey = (Uri, String?, String?);
 
 class NetworkCache {
-  final Uri uri;
-
   final Map<String, dynamic> requestHeaders;
 
   final Map<String, List<String>> responseHeaders;
@@ -15,7 +16,6 @@ class NetworkCache {
   final int size;
 
   const NetworkCache({
-    required this.uri,
     required this.requestHeaders,
     required this.responseHeaders,
     required this.data,
@@ -31,34 +31,32 @@ class NetworkCacheManager implements Interceptor {
 
   factory NetworkCacheManager() => instance;
 
-  final Map<Uri, NetworkCache> _cache = {};
+  final _cache = <_CacheKey, NetworkCache>{};
 
   int size = 0;
 
-  NetworkCache? getCache(Uri uri) {
-    return _cache[uri];
+  static _CacheKey _key(RequestOptions options) {
+    return (
+      options.uri,
+      options.extra[proxySourceKey] as String?,
+      options.extra[resolvedProxyKey] as String?,
+    );
   }
 
   static const _maxCacheSize = 10 * 1024 * 1024;
 
-  void setCache(NetworkCache cache) {
-    if (_cache.containsKey(cache.uri)) {
-      size -= _cache[cache.uri]!.size;
-    }
+  void _setCache(_CacheKey key, NetworkCache cache) {
+    _removeCache(key);
     while (size > _maxCacheSize) {
       size -= _cache.values.first.size;
       _cache.remove(_cache.keys.first);
     }
-    _cache[cache.uri] = cache;
+    _cache[key] = cache;
     size += cache.size;
   }
 
-  void removeCache(Uri uri) {
-    var cache = _cache[uri];
-    if (cache != null) {
-      size -= cache.size;
-    }
-    _cache.remove(uri);
+  void _removeCache(_CacheKey key) {
+    size -= _cache.remove(key)?.size ?? 0;
   }
 
   void clear() {
@@ -80,7 +78,14 @@ class NetworkCacheManager implements Interceptor {
     if (options.method != "GET") {
       return handler.next(options);
     }
-    var cache = getCache(options.uri);
+    if (!options.extra.containsKey(resolvedProxyKey)) {
+      options.extra[resolvedProxyKey] = await getProxy(
+        uri: options.uri,
+        sourceKey: options.extra[proxySourceKey] as String?,
+      );
+    }
+    final key = _key(options);
+    var cache = _cache[key];
     if (cache == null ||
         !compareHeaders(options.headers, cache.requestHeaders)) {
       if (options.headers['cache-time'] != null) {
@@ -90,7 +95,7 @@ class NetworkCacheManager implements Interceptor {
     } else {
       if (options.headers['cache-time'] == 'no') {
         options.headers.remove('cache-time');
-        removeCache(options.uri);
+        _removeCache(key);
         return handler.next(options);
       }
     }
@@ -130,7 +135,7 @@ class NetworkCacheManager implements Interceptor {
         ));
       }
     }
-    removeCache(options.uri);
+    _removeCache(key);
     handler.next(options);
   }
 
@@ -191,14 +196,13 @@ class NetworkCacheManager implements Interceptor {
     var size = _calculateSize(response.data);
     if (size != null && size < 1024 * 1024 && size > 0) {
       var cache = NetworkCache(
-        uri: response.requestOptions.uri,
         requestHeaders: response.requestOptions.headers,
         responseHeaders: Map.from(response.headers.map),
         data: response.data,
         time: DateTime.now(),
         size: size,
       );
-      setCache(cache);
+      _setCache(_key(response.requestOptions), cache);
     }
     handler.next(response);
   }

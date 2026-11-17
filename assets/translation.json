@@ -442,7 +442,20 @@
     "Mouse scroll speed": "鼠标滚动速度",
     "Mirror switched to @n": "已切换到镜像 @n",
     "Proxy type": "代理类型",
-    "Test connection": "测试连接"
+    "Test connection": "测试连接",
+    "Proxy Rules": "代理规则",
+    "Source rules take precedence over domain rules. Other requests use the global proxy.": "漫画源规则优先于域名规则，未匹配的请求使用全局代理。",
+    "Domain": "域名",
+    "Domain rules include subdomains.": "域名规则同时匹配子域名。",
+    "Enter a valid domain": "请输入有效的域名",
+    "This domain already has a rule": "此域名已有规则",
+    "Select a comic source": "请选择漫画源",
+    "Proxy URL": "代理地址",
+    "Enter a valid proxy URL": "请输入有效的代理地址",
+    "Direct": "直连",
+    "System": "系统",
+    "Manual": "手动",
+    "Save": "保存"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -887,6 +900,19 @@
     "Mouse scroll speed": "滑鼠滾動速度",
     "Mirror switched to @n": "已切換到鏡像 @n",
     "Proxy type": "代理類型",
-    "Test connection": "測試連線"
+    "Test connection": "測試連線",
+    "Proxy Rules": "代理規則",
+    "Source rules take precedence over domain rules. Other requests use the global proxy.": "漫畫源規則優先於網域規則，未符合規則的請求使用全域代理。",
+    "Domain": "網域",
+    "Domain rules include subdomains.": "網域規則同時適用於子網域。",
+    "Enter a valid domain": "請輸入有效的網域",
+    "This domain already has a rule": "此網域已有規則",
+    "Select a comic source": "請選擇漫畫源",
+    "Proxy URL": "代理位址",
+    "Enter a valid proxy URL": "請輸入有效的代理位址",
+    "Direct": "直接連線",
+    "System": "系統",
+    "Manual": "手動",
+    "Save": "儲存"
   }
 }

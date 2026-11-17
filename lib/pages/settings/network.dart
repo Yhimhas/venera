@@ -18,6 +18,10 @@ class _NetworkSettingsState extends State<NetworkSettings> {
           builder: () => const _ProxySettingView(),
         ).toSliver(),
         _PopupWindowSetting(
+          title: "Proxy Rules".tl,
+          builder: () => const _ProxyRulesView(),
+        ).toSliver(),
+        _PopupWindowSetting(
           title: "DNS Overrides".tl,
           builder: () => const _DNSOverrides(),
         ).toSliver(),
@@ -163,24 +167,17 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
     if (!(formKey.currentState?.validate() ?? false)) {
       return;
     }
-    var old = appdata.settings['proxy'];
+    final proxy = toProxyStr();
     setState(() => testing = true);
     try {
-      appdata.settings['proxy'] = toProxyStr();
-      resetProxyCache();
-      var dio = Dio()..httpClientAdapter = RHttpAdapter();
       var stopwatch = Stopwatch()..start();
-      var res = await dio.get<String>(
+      final statusCode = await RHttpAdapter.probeProxy(
         SourceRepo.defaultUrl,
-        options: Options(
-          responseType: ResponseType.plain,
-          connectTimeout: const Duration(seconds: 8),
-          receiveTimeout: const Duration(seconds: 15),
-        ),
+        proxy,
       );
       stopwatch.stop();
-      if (res.statusCode != 200) {
-        throw Exception("HTTP ${res.statusCode}");
+      if (statusCode != 200) {
+        throw Exception("HTTP $statusCode");
       }
       App.rootContext.showMessage(
         message: "${"Success".tl} (${stopwatch.elapsedMilliseconds} ms)",
@@ -188,8 +185,6 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
     } catch (e) {
       App.rootContext.showMessage(message: "${"Error".tl}: $e");
     } finally {
-      appdata.settings['proxy'] = old;
-      resetProxyCache();
       if (mounted) {
         setState(() => testing = false);
       }

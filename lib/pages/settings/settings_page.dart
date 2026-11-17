@@ -30,6 +30,7 @@ part 'local_favorites.dart';
 part 'app.dart';
 part 'about.dart';
 part 'network.dart';
+part 'proxy_rules.dart';
 part 'debug.dart';
 
 class SettingsPage extends StatefulWidget {

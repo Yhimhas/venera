@@ -3,6 +3,43 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/utils/ext.dart';
 
+const proxySourceKey = 'venera.proxySourceKey';
+const resolvedProxyKey = 'venera.resolvedProxy';
+
+enum ProxyRuleScope {
+  source('sourceProxies'),
+  domain('domainProxies');
+
+  const ProxyRuleScope(this.settingsKey);
+
+  final String settingsKey;
+}
+
+Map<String, String> readProxyRules(ProxyRuleScope scope) {
+  final rules = appdata.settings[scope.settingsKey];
+  return rules is Map
+      ? {
+          for (final entry in rules.entries)
+            if (entry.key is String && entry.value is String)
+              entry.key as String: entry.value as String,
+        }
+      : {};
+}
+
+String? normalizeProxyDomain(String value) {
+  final host = _normalizeHost(value.trim());
+  final label = RegExp(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$');
+  if (host.length > 253 || !host.split('.').every(label.hasMatch)) {
+    return null;
+  }
+  return host;
+}
+
+String _normalizeHost(String host) {
+  host = host.toLowerCase();
+  return host.endsWith('.') ? host.substring(0, host.length - 1) : host;
+}
+
 String? _cachedProxy;
 
 DateTime? _cachedProxyTime;
@@ -13,25 +50,40 @@ void resetProxyCache() {
   _cachedProxyTime = null;
 }
 
-Future<String?> getProxy() async {
+Future<String?> getProxy({Uri? uri, String? sourceKey}) async {
+  final sourceRules = appdata.settings[ProxyRuleScope.source.settingsKey];
+  final domainRules = appdata.settings[ProxyRuleScope.domain.settingsKey];
+  Object? proxy = sourceKey != null && sourceRules is Map
+      ? sourceRules[sourceKey]
+      : null;
+  if (proxy is! String && uri != null && domainRules is Map) {
+    // A rule covers its host and subdomains. Look up the longest match first.
+    var host = _normalizeHost(uri.host);
+    while (host.isNotEmpty) {
+      proxy = domainRules[host];
+      if (proxy is String) break;
+      final dot = host.indexOf('.');
+      if (dot < 0) break;
+      host = host.substring(dot + 1);
+    }
+  }
+  final setting = proxy is String ? proxy : appdata.settings['proxy'];
+  if (setting is! String) return null;
+  if (setting != 'system') {
+    return setting.removeAllBlank == 'direct' ? null : normalizeProxy(setting);
+  }
+
   if (_cachedProxyTime != null &&
       DateTime.now().difference(_cachedProxyTime!).inSeconds < 1) {
     return _cachedProxy;
   }
-  String? proxy = await _getProxy();
-  _cachedProxy = proxy;
+  final systemProxy = await _getSystemProxy();
+  _cachedProxy = systemProxy;
   _cachedProxyTime = DateTime.now();
-  return proxy;
+  return systemProxy;
 }
 
-Future<String?> _getProxy() async {
-  if ((appdata.settings['proxy'] as String).removeAllBlank == "direct") {
-    return null;
-  }
-  if (appdata.settings['proxy'] != "system") {
-    return normalizeProxy(appdata.settings['proxy']);
-  }
-
+Future<String?> _getSystemProxy() async {
   String res;
   if (!App.isLinux) {
     const channel = MethodChannel("venera/method_channel");
