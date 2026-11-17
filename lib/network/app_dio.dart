@@ -12,6 +12,7 @@ import 'package:venera/network/proxy.dart';
 import '../foundation/app.dart';
 import 'cloudflare.dart';
 import 'cookie_jar.dart';
+import 'retry.dart';
 
 export 'package:dio/dio.dart';
 
@@ -134,6 +135,7 @@ class AppDio with DioMixin {
       interceptors.add(NetworkCacheManager());
       interceptors.add(CloudflareInterceptor());
       interceptors.add(MyLogInterceptor());
+      interceptors.add(RetryInterceptor(this));
     }
   }
 

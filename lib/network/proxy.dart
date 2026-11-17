@@ -7,6 +7,12 @@ String? _cachedProxy;
 
 DateTime? _cachedProxyTime;
 
+/// Drops the cached proxy, so a changed setting takes effect immediately.
+void resetProxyCache() {
+  _cachedProxy = null;
+  _cachedProxyTime = null;
+}
+
 Future<String?> getProxy() async {
   if (_cachedProxyTime != null &&
       DateTime.now().difference(_cachedProxyTime!).inSeconds < 1) {
@@ -22,7 +28,9 @@ Future<String?> _getProxy() async {
   if ((appdata.settings['proxy'] as String).removeAllBlank == "direct") {
     return null;
   }
-  if (appdata.settings['proxy'] != "system") return appdata.settings['proxy'];
+  if (appdata.settings['proxy'] != "system") {
+    return normalizeProxy(appdata.settings['proxy']);
+  }
 
   String res;
   if (!App.isLinux) {
@@ -42,7 +50,7 @@ Future<String?> _getProxy() async {
     for (String proxy in proxies) {
       proxy = proxy.removeAllBlank;
       if (proxy.startsWith('https=')) {
-        return proxy.substring(6);
+        return normalizeProxy(proxy.substring(6));
       }
     }
   }
@@ -56,5 +64,28 @@ Future<String?> _getProxy() async {
     return null;
   }
 
-  return res;
+  return normalizeProxy(res);
+}
+
+/// Supported proxy schemes.
+const supportedProxySchemes = ['http', 'https', 'socks5'];
+
+/// Coerce a proxy string into a url understood by rhttp.
+///
+/// `HOST:PORT` (the old format) is treated as a http proxy, so existing
+/// settings keep working.
+String? normalizeProxy(String? proxy) {
+  if (proxy == null) return null;
+  var value = proxy.removeAllBlank;
+  if (value.isEmpty) return null;
+  final lower = value.toLowerCase();
+  for (final scheme in supportedProxySchemes) {
+    if (lower.startsWith('$scheme://')) {
+      return value;
+    }
+  }
+  if (lower.startsWith('socks5h://')) {
+    return value;
+  }
+  return 'http://$value';
 }

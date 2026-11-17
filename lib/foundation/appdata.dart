@@ -367,5 +367,8 @@ async function processImage(image, cid, eid, page, sourceKey) {
 }
 ''';
 
+// `cdn.jsdelivr.net` is SNI filtered in mainland China, the other jsdelivr
+// mirrors serve the same content and stay reachable, so the default points to
+// `fastly.jsdelivr.net`. See [SourceRepo] for the mirror fallback logic.
 const _defaultSourceListUrl =
-    "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
+    "https://fastly.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";

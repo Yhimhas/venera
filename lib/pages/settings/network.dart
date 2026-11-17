@@ -42,19 +42,20 @@ class _ProxySettingView extends StatefulWidget {
 
 class _ProxySettingViewState extends State<_ProxySettingView> {
   String type = '';
+  String scheme = 'http';
   String host = '';
   String port = '';
   String username = '';
   String password = '';
 
-  // USERNAME:PASSWORD@HOST:PORT
+  // SCHEME://USERNAME:PASSWORD@HOST:PORT
   String toProxyStr() {
     if (type == 'direct') {
       return 'direct';
     } else if (type == 'system') {
       return 'system';
     }
-    var res = '';
+    var res = '$scheme://';
     if (username.isNotEmpty) {
       res += username;
       if (password.isNotEmpty) {
@@ -78,7 +79,15 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
       return;
     }
     type = 'manual';
-    var parts = proxy.split('@');
+    var value = proxy;
+    for (var s in supportedProxySchemes) {
+      if (value.toLowerCase().startsWith('$s://')) {
+        scheme = s;
+        value = value.substring(s.length + 3);
+        break;
+      }
+    }
+    var parts = value.split('@');
     if (parts.length == 2) {
       var auth = parts[0].split(':');
       if (auth.length == 2) {
@@ -91,7 +100,7 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
         port = parts[1];
       }
     } else {
-      parts = proxy.split(':');
+      parts = value.split(':');
       if (parts.length == 2) {
         host = parts[0];
         port = parts[1];
@@ -146,11 +155,70 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
 
   var formKey = GlobalKey<FormState>();
 
+  bool testing = false;
+
+  /// Requests the default repository through the proxy being edited, so the
+  /// user can tell whether the proxy actually works before saving it.
+  Future<void> testProxy() async {
+    if (!(formKey.currentState?.validate() ?? false)) {
+      return;
+    }
+    var old = appdata.settings['proxy'];
+    setState(() => testing = true);
+    try {
+      appdata.settings['proxy'] = toProxyStr();
+      resetProxyCache();
+      var dio = Dio()..httpClientAdapter = RHttpAdapter();
+      var stopwatch = Stopwatch()..start();
+      var res = await dio.get<String>(
+        SourceRepo.defaultUrl,
+        options: Options(
+          responseType: ResponseType.plain,
+          connectTimeout: const Duration(seconds: 8),
+          receiveTimeout: const Duration(seconds: 15),
+        ),
+      );
+      stopwatch.stop();
+      if (res.statusCode != 200) {
+        throw Exception("HTTP ${res.statusCode}");
+      }
+      App.rootContext.showMessage(
+        message: "${"Success".tl} (${stopwatch.elapsedMilliseconds} ms)",
+      );
+    } catch (e) {
+      App.rootContext.showMessage(message: "${"Error".tl}: $e");
+    } finally {
+      appdata.settings['proxy'] = old;
+      resetProxyCache();
+      if (mounted) {
+        setState(() => testing = false);
+      }
+    }
+  }
+
   Widget buildManualProxy() {
     return Form(
       key: formKey,
       child: Column(
         children: [
+          Row(
+            children: [
+              Text("Proxy type".tl).paddingRight(12),
+              for (var s in supportedProxySchemes)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(s.toUpperCase()),
+                    selected: scheme == s,
+                    onSelected: (v) {
+                      setState(() {
+                        scheme = s;
+                      });
+                    },
+                  ),
+                ),
+            ],
+          ).paddingBottom(8),
           TextFormField(
             decoration: InputDecoration(
               border: const OutlineInputBorder(),
@@ -216,15 +284,32 @@ class _ProxySettingViewState extends State<_ProxySettingView> {
             },
           ),
           const SizedBox(height: 16),
-          FilledButton(
-            onPressed: () {
-              if (formKey.currentState?.validate() ?? false) {
-                appdata.settings['proxy'] = toProxyStr();
-                appdata.saveData();
-                App.rootContext.pop();
-              }
-            },
-            child: Text("Save".tl),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              FilledButton(
+                onPressed: () {
+                  if (formKey.currentState?.validate() ?? false) {
+                    appdata.settings['proxy'] = toProxyStr();
+                    appdata.saveData();
+                    resetProxyCache();
+                    App.rootContext.pop();
+                  }
+                },
+                child: Text("Save".tl),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton(
+                onPressed: testing ? null : testProxy,
+                child: testing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text("Test connection".tl),
+              ),
+            ],
           ),
         ],
       ),

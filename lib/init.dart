@@ -98,7 +98,18 @@ void _checkOldConfigs() {
 
   if (appdata.settings['comicSourceListUrl'].toString().contains("git.nyne.dev")) {
     // migrate to jsdelivr cdn
-    appdata.settings['comicSourceListUrl'] = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
+    appdata.settings['comicSourceListUrl'] =
+        "https://fastly.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
+    appdata.saveData();
+  }
+
+  // `cdn.jsdelivr.net` is SNI filtered in mainland China while the other
+  // jsdelivr mirrors still work, so migrate the old default url.
+  if (appdata.settings['comicSourceListUrl'].toString().contains(
+        "cdn.jsdelivr.net/gh/venera-app/venera-configs",
+      )) {
+    appdata.settings['comicSourceListUrl'] =
+        "https://fastly.jsdelivr.net/gh/venera-app/venera-configs@main/index.json";
     appdata.saveData();
   }
 }

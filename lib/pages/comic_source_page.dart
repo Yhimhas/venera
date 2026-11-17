@@ -7,6 +7,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_source/source_repo.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
@@ -57,6 +58,7 @@ class ComicSourcePage extends StatelessWidget {
       }
     } catch (e) {
       if (cancel) return;
+      controller?.close();
       if (showLoading) {
         App.rootContext.showMessage(message: e.toString());
       } else {
@@ -301,19 +303,21 @@ class _BodyState extends State<_Body> {
       onCancel: () => cancel = true,
       barrierDismissible: false,
     );
+    String? source;
     try {
-      var res = await AppDio().get<String>(
-        url,
-        options: Options(
-          responseType: ResponseType.plain,
-          headers: {"cache-time": "no"},
-        ),
-      );
-      if (cancel) return;
-      controller.close();
-      await addSource(res.data!, fileName);
+      source = await SourceRepo.fetchText(url);
     } catch (e, s) {
       if (cancel) return;
+      controller.close();
+      context.showMessage(message: e.toString());
+      Log.error("Add comic source", "$e\n$s");
+      return;
+    }
+    if (cancel) return;
+    controller.close();
+    try {
+      await addSource(source, fileName);
+    } catch (e, s) {
       context.showMessage(message: e.toString());
       Log.error("Add comic source", "$e\n$s");
     }
@@ -342,36 +346,44 @@ class _ComicSourceListState extends State<_ComicSourceList> {
   bool changed = false;
   var controller = TextEditingController();
 
+  /// The url which actually served the current list. Mirrors are tried when
+  /// the configured url is unreachable, and sources must be downloaded from
+  /// the url which actually works.
+  String? _effectiveUrl;
+
   void load() async {
-    if (json != null) {
-      setState(() {
-        json = null;
-      });
-    }
+    setState(() {
+      json = null;
+      _effectiveUrl = null;
+    });
     if (controller.text.isEmpty) {
       setState(() {
         json = [];
       });
       return;
     }
-    var dio = AppDio();
     try {
-      var res = await dio.get<String>(controller.text);
-      if (res.statusCode != 200) {
-        throw "error";
-      }
-      if (mounted) {
-        setState(() {
-          json = jsonDecode(res.data!);
-        });
+      var result = await SourceRepo.load(controller.text);
+      if (!mounted) return;
+      setState(() {
+        json = result.data;
+        _effectiveUrl = result.url;
+      });
+      if (result.url != controller.text.trim()) {
+        controller.text = result.url;
+        changed = true;
+        setState(() {});
+        var host = Uri.tryParse(result.url)?.host ?? result.url;
+        context.showMessage(
+          message: "Mirror switched to @n".tlParams({"n": host}),
+        );
       }
     } catch (e) {
-      context.showMessage(message: "Network error".tl);
-      if (mounted) {
-        setState(() {
-          json = [];
-        });
-      }
+      if (!mounted) return;
+      context.showMessage(message: "${"Network error".tl}: $e");
+      setState(() {
+        json = [];
+      });
     }
   }
 
@@ -480,8 +492,9 @@ class _ComicSourceListState extends State<_ComicSourceList> {
                   var fileName = json![index]["fileName"];
                   var url = json![index]["url"];
                   if (url == null || !(url.toString()).isURL) {
-                    var listUrl =
-                        appdata.settings['comicSourceListUrl'] as String;
+                    // Use the url which actually served the list, so switching
+                    // the repository url takes effect immediately.
+                    var listUrl = _effectiveUrl ?? controller.text;
                     if (listUrl
                         .replaceFirst("https://", "")
                         .replaceFirst("http://", "")
