@@ -139,7 +139,28 @@ class AppDio with DioMixin {
     }
   }
 
-  static final Map<String, bool> _requests = {};
+  /// Locks for requests marked with the `prevent-parallel` header.
+  ///
+  /// Two requests for the same url must not run at the same time; before, this
+  /// was implemented by polling the state map every 20ms, which both wasted
+  /// timers and released the lock of another request when the failing request
+  /// did not own it.
+  static final Map<String, Completer<void>> _locks = {};
+
+  static Future<void> _acquire(String key) async {
+    while (true) {
+      var holder = _locks[key];
+      if (holder == null) {
+        break;
+      }
+      await holder.future;
+    }
+    _locks[key] = Completer<void>();
+  }
+
+  static void _release(String key) {
+    _locks.remove(key)?.complete();
+  }
 
   @override
   Future<Response<T>> request<T>(
@@ -151,15 +172,13 @@ class AppDio with DioMixin {
     ProgressCallback? onSendProgress,
     ProgressCallback? onReceiveProgress,
   }) async {
-    if (options?.headers?['prevent-parallel'] == 'true') {
-      while (_requests.containsKey(path)) {
-        await Future.delayed(const Duration(milliseconds: 20));
-      }
-      _requests[path] = true;
+    var serial = options?.headers?['prevent-parallel'] == 'true';
+    if (serial) {
+      await _acquire(path);
       options!.headers!.remove('prevent-parallel');
     }
     try {
-      return super.request<T>(
+      return await super.request<T>(
         path,
         data: data,
         queryParameters: queryParameters,
@@ -169,17 +188,33 @@ class AppDio with DioMixin {
         onReceiveProgress: onReceiveProgress,
       );
     } finally {
-      if (_requests.containsKey(path)) {
-        _requests.remove(path);
+      if (serial) {
+        _release(path);
       }
     }
   }
 }
 
 class RHttpAdapter implements HttpClientAdapter {
-  Future<rhttp.ClientSettings> get settings async {
-    var proxy = await getProxy();
+  /// `rhttp.Rhttp.request(settings: ...)` builds a brand new native client for
+  /// every request, and a native client owns the connection pool and the TLS
+  /// session cache. Doing that per request means a full TCP + TLS handshake for
+  /// every single request, which is very expensive on filtered networks where
+  /// handshakes are also the first thing to be reset.
+  ///
+  /// So one client is kept here and shared by every request; it is rebuilt only
+  /// when a setting which affects it changes.
+  static rhttp.RhttpClient? _client;
 
+  static String? _clientKey;
+
+  static Future<rhttp.RhttpClient>? _pendingClient;
+
+  Future<rhttp.ClientSettings> get settings async {
+    return _buildSettings(await getProxy());
+  }
+
+  static rhttp.ClientSettings _buildSettings(String? proxy) {
     return rhttp.ClientSettings(
       proxySettings: proxy == null
           ? const rhttp.ProxySettings.noProxy()
@@ -199,6 +234,51 @@ class RHttpAdapter implements HttpClientAdapter {
     );
   }
 
+  /// Everything in [ClientSettings] which cannot change the meaning of an
+  /// already established connection is left out, so editing e.g. the timeout
+  /// does not throw the connection pool away.
+  static String _clientKeyOf(String? proxy) {
+    return [
+      proxy ?? '',
+      appdata.settings['sni'] != false,
+      appdata.settings['ignoreBadCertificate'] != true,
+      _getOverrides().entries
+          .map((e) => "${e.key}=${e.value.join(',')}")
+          .join(';'),
+    ].join('|');
+  }
+
+  static Future<rhttp.RhttpClient> _getClient() async {
+    var proxy = await getProxy();
+    var key = _clientKeyOf(proxy);
+    var client = _client;
+    if (client != null && key == _clientKey) {
+      return client;
+    }
+    // Another request may be creating a client for the same settings.
+    var pending = _pendingClient;
+    if (pending != null) {
+      var created = await pending;
+      if (key == _clientKey) {
+        return created;
+      }
+    }
+    var future = rhttp.RhttpClient.create(settings: _buildSettings(proxy));
+    _pendingClient = future;
+    try {
+      var created = await future;
+      var old = _client;
+      _client = created;
+      _clientKey = key;
+      old?.dispose();
+      return created;
+    } finally {
+      if (identical(_pendingClient, future)) {
+        _pendingClient = null;
+      }
+    }
+  }
+
   static Map<String, List<String>> _getOverrides() {
     if (!appdata.settings['enableDnsOverrides'] == true) {
       return {};
@@ -216,7 +296,10 @@ class RHttpAdapter implements HttpClientAdapter {
   }
 
   @override
-  void close({bool force = false}) {}
+  void close({bool force = false}) {
+    // The client is shared by all the adapters in the app, so it must not be
+    // disposed together with a single (short lived) dio instance.
+  }
 
   @override
   Future<ResponseBody> fetch(
@@ -229,10 +312,9 @@ class RHttpAdapter implements HttpClientAdapter {
       options.headers['User-Agent'] = "venera/v${App.version}";
     }
 
-    var res = await rhttp.Rhttp.request(
+    var res = await (await _getClient()).request(
       method: rhttp.HttpMethod(options.method),
       url: options.uri.toString(),
-      settings: await settings,
       expectBody: rhttp.HttpExpectBody.stream,
       body: requestStream == null ? null : rhttp.HttpBody.stream(requestStream),
       headers: rhttp.HttpHeaders.rawMap(
