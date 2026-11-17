@@ -28,7 +28,7 @@ A comic reader that support reading local and network comics.
 4. Build for your platform: e.g. `flutter build apk`
 
 ## Create a new comic source
-See [Comic Source](doc/comic_source.md)
+See [Comic Source](docs/comic_source.md)
 
 ## Thanks
 
@@ -38,5 +38,5 @@ See [Comic Source](doc/comic_source.md)
 The Chinese translation of the manga tags is from this project.
 
 ## Headless Mode
-See [Headless Doc](doc/headless_doc.md)
+See [Headless Doc](docs/headless_doc.md)
 
