@@ -10,12 +10,14 @@ class FileDownloader {
   final String savePath;
   final int maxConcurrent;
   final String? sourceKey;
+  final bool retainCheckpoint;
 
   FileDownloader(
     this.url,
     this.savePath, {
     this.maxConcurrent = 4,
     this.sourceKey,
+    this.retainCheckpoint = false,
   }) {
     if (maxConcurrent < 1) {
       throw ArgumentError.value(maxConcurrent, 'maxConcurrent');
@@ -42,7 +44,7 @@ class FileDownloader {
     await temporary.rename(_checkpoint.path);
   }
 
-  Future<List<_DownloadBlock>?> _readStatus() async {
+  Future<List<_DownloadBlock>?> _readStatus(int fileSize) async {
     if (!await _checkpoint.exists()) return null;
     final lines = await _checkpoint.readAsLines();
     final blocks = <_DownloadBlock>[];
@@ -56,7 +58,7 @@ class FileDownloader {
       if (start != nextStart ||
           end == null ||
           end <= nextStart ||
-          end > _fileSize ||
+          end > fileSize ||
           downloaded == null ||
           downloaded < 0 ||
           downloaded > end - nextStart) {
@@ -65,10 +67,22 @@ class FileDownloader {
       blocks.add(_DownloadBlock(nextStart, end, downloaded));
       nextStart = end;
     }
-    return nextStart == _fileSize ? blocks : null;
+    return nextStart == fileSize ? blocks : null;
   }
 
   Future<void> _prepareDownload() async {
+    final file = File(savePath);
+    final localSize = await file.exists() ? await file.length() : 0;
+    final saved = localSize > 0 ? await _readStatus(localSize) : null;
+    if (_stopped) return;
+    if (retainCheckpoint &&
+        saved != null &&
+        saved.every((block) => block.remaining == 0)) {
+      // Extraction can resume after restart without contacting the archive host.
+      _fileSize = _currentBytes = localSize;
+      return;
+    }
+
     final response = await _dio.head<void>(
       url,
       options: Options(headers: {HttpHeaders.acceptEncodingHeader: 'identity'}),
@@ -82,11 +96,7 @@ class FileDownloader {
       throw const FormatException('Archive has no valid Content-Length');
     }
     _fileSize = size;
-    final file = File(savePath);
-    final restored = await file.exists() && await file.length() == size
-        ? await _readStatus()
-        : null;
-    if (_stopped) return;
+    final restored = localSize == size ? saved : null;
     if (restored != null) {
       _blocks = restored;
       _currentBytes = restored.fold(
@@ -163,7 +173,7 @@ class FileDownloader {
           'Expected $_fileSize archive bytes, downloaded $_currentBytes',
         );
       }
-      await _checkpoint.delete();
+      if (!retainCheckpoint) await _checkpoint.delete();
       progress.add(DownloadingStatus(_currentBytes, _fileSize, 0, true));
     } catch (error, stack) {
       if (!_stopped) progress.addError(error, stack);

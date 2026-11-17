@@ -479,6 +479,10 @@ class LocalManager with ChangeNotifier {
   }
 
   List<DownloadTask> downloadingTasks = [];
+  Future<bool> _queueWrite = Future<bool>.value(true);
+
+  File get _downloadQueueFile =>
+      File(FilePath.join(App.dataPath, 'downloading_tasks.json'));
 
   bool isDownloading(String id, ComicType type) {
     return downloadingTasks
@@ -499,12 +503,13 @@ class LocalManager with ChangeNotifier {
     return Directory(FilePath.join(path, dir)).create().then((value) => value);
   }
 
-  void completeTask(DownloadTask task) {
+  Future<bool> completeTask(DownloadTask task) {
     add(task.toLocalComic());
     downloadingTasks.remove(task);
     notifyListeners();
-    saveCurrentDownloadingTasks();
+    final saved = saveCurrentDownloadingTasks();
     downloadingTasks.firstOrNull?.resume();
+    return saved;
   }
 
   void removeTask(DownloadTask task) {
@@ -527,26 +532,63 @@ class LocalManager with ChangeNotifier {
     }
   }
 
-  Future<void> saveCurrentDownloadingTasks() async {
-    var tasks = downloadingTasks.map((e) => e.toJson()).toList();
-    await File(FilePath.join(App.dataPath, 'downloading_tasks.json'))
-        .writeAsString(jsonEncode(tasks));
+  Future<bool> saveCurrentDownloadingTasks() async {
+    try {
+      final snapshot = jsonEncode(
+        downloadingTasks.map((task) => task.toJson()).toList(),
+      );
+      final file = _downloadQueueFile;
+      final write = _queueWrite.then((_) async {
+        final temporary = File('${file.path}.tmp');
+        await temporary.writeAsString(snapshot, flush: true);
+        await temporary.rename(file.path);
+        return true;
+      }).catchError(_logQueueSaveError);
+      _queueWrite = write;
+      return await write;
+    } catch (error, stack) {
+      return _logQueueSaveError(error, stack);
+    }
+  }
+
+  bool _logQueueSaveError(Object error, StackTrace stack) {
+    Log.error('LocalManager', 'Failed to save downloading tasks: $error', stack);
+    return false;
   }
 
   void restoreDownloadingTasks() {
-    var file = File(FilePath.join(App.dataPath, 'downloading_tasks.json'));
-    if (file.existsSync()) {
+    final file = _downloadQueueFile;
+    if (!file.existsSync()) return;
+    final List<dynamic> entries;
+    try {
+      final decoded = jsonDecode(file.readAsStringSync());
+      if (decoded is! List<dynamic>) {
+        throw const FormatException('Expected a list of downloading tasks');
+      }
+      entries = decoded;
+    } catch (error, stack) {
+      Log.error(
+        'LocalManager',
+        'Failed to restore downloading tasks: $error',
+        stack,
+      );
+      return;
+    }
+    for (final entry in entries) {
       try {
-        var tasks = jsonDecode(file.readAsStringSync());
-        for (var e in tasks) {
-          var task = DownloadTask.fromJson(e);
-          if (task != null) {
-            downloadingTasks.add(task);
-          }
+        if (entry is! Map<String, dynamic>) {
+          throw const FormatException('Expected a downloading task object');
         }
-      } catch (e) {
-        file.delete();
-        Log.error("LocalManager", "Failed to restore downloading tasks: $e");
+        final task = DownloadTask.fromJson(entry);
+        if (task != null && !isDownloading(task.id, task.comicType)) {
+          downloadingTasks.add(task);
+        }
+      } catch (error, stack) {
+        Log.error(
+          'LocalManager',
+          'Skipped invalid downloading task: $error',
+          stack,
+        );
       }
     }
   }

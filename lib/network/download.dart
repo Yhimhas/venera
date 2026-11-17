@@ -59,6 +59,8 @@ abstract class DownloadTask with ChangeNotifier {
     switch (json["type"]) {
       case "ImagesDownloadTask":
         return ImagesDownloadTask.fromJson(json);
+      case "ArchiveDownloadTask":
+        return ArchiveDownloadTask.fromJson(json);
       default:
         return null;
     }
@@ -457,6 +459,8 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       return null;
     }
 
+    final source = ComicSource.find(json["source"]);
+    if (source == null) return null;
     Map<String, List<String>>? images;
     if (json["images"] != null) {
       images = {};
@@ -466,7 +470,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
     }
 
     return ImagesDownloadTask(
-      source: ComicSource.find(json["source"])!,
+      source: source,
       comicId: json["comicId"],
       comic:
           json["comic"] == null ? null : ComicDetails.fromJson(json["comic"]),
@@ -707,9 +711,7 @@ class ArchiveDownloadTask extends DownloadTask {
     _isRunning = false;
     await _downloader?.stop();
     await _run;
-    await _archiveFile.deleteIgnoreError();
-    await File('${_archiveFile.path}.download').deleteIgnoreError();
-    await File('${_archiveFile.path}.download.tmp').deleteIgnoreError();
+    await _deleteStagingFiles();
     if (path != null) {
       await Directory(path!).deleteIgnoreError(recursive: true);
     }
@@ -784,6 +786,7 @@ class ArchiveDownloadTask extends DownloadTask {
         if (!(await dir.exists())) {
           await dir.create();
         }
+        await LocalManager().saveCurrentDownloadingTasks();
       }
       if (!_isCurrent(runId)) return;
 
@@ -795,6 +798,7 @@ class ArchiveDownloadTask extends DownloadTask {
           archiveUrl,
           _archiveFile.path,
           sourceKey: source.key,
+          retainCheckpoint: true,
         );
         await for (final status in downloader.start()) {
           if (status.isFinished) _archiveReady = true;
@@ -820,14 +824,20 @@ class ArchiveDownloadTask extends DownloadTask {
         return;
       }
       if (!_isCurrent(runId)) return;
-      LocalManager().completeTask(this);
+      final saved = await LocalManager().completeTask(this);
       _isRunning = false;
-      await _archiveFile.deleteIgnoreError();
+      if (saved) await _deleteStagingFiles();
     } catch (e) {
       if (_isCurrent(runId)) _setError("Error: $e");
     } finally {
       _downloader = null;
     }
+  }
+
+  Future<void> _deleteStagingFiles() async {
+    await _archiveFile.deleteIgnoreError();
+    await File('${_archiveFile.path}.download').deleteIgnoreError();
+    await File('${_archiveFile.path}.download.tmp').deleteIgnoreError();
   }
 
   static Future<void> _extractArchive(String archive, String outDir) async {
@@ -871,10 +881,9 @@ class ArchiveDownloadTask extends DownloadTask {
     if (json["type"] != "ArchiveDownloadTask") {
       return null;
     }
-    return ArchiveDownloadTask(
-      json["archiveUrl"],
-      ComicDetails.fromJson(json["comic"]),
-    )..path = json["path"];
+    final comic = ComicDetails.fromJson(json["comic"]);
+    if (ComicSource.find(comic.sourceKey) == null) return null;
+    return ArchiveDownloadTask(json["archiveUrl"], comic)..path = json["path"];
   }
 
   String _findCover() {
