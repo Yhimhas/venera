@@ -1,8 +1,9 @@
 import 'dart:typed_data';
+
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/proxy.dart';
 
-typedef _CacheKey = (Uri, String?, String?);
+typedef _CacheKey = (Uri, String?, String?, ResponseType);
 
 class NetworkCache {
   final Map<String, dynamic> requestHeaders;
@@ -24,22 +25,20 @@ class NetworkCache {
   });
 }
 
-class NetworkCacheManager implements Interceptor {
-  NetworkCacheManager._();
+class NetworkCacheManager extends Interceptor {
+  NetworkCacheManager([this._dio]);
 
-  static final NetworkCacheManager instance = NetworkCacheManager._();
-
-  factory NetworkCacheManager() => instance;
-
-  final _cache = <_CacheKey, NetworkCache>{};
-
-  int size = 0;
+  final Dio? _dio;
+  static final _cache = <_CacheKey, NetworkCache>{};
+  static int _size = 0;
+  static const _cacheDirectiveKey = 'venera.cacheDirective';
 
   static _CacheKey _key(RequestOptions options) {
     return (
       options.uri,
       options.extra[proxySourceKey] as String?,
       options.extra[resolvedProxyKey] as String?,
+      options.responseType,
     );
   }
 
@@ -47,29 +46,20 @@ class NetworkCacheManager implements Interceptor {
 
   void _setCache(_CacheKey key, NetworkCache cache) {
     _removeCache(key);
-    while (size > _maxCacheSize) {
-      size -= _cache.values.first.size;
-      _cache.remove(_cache.keys.first);
+    while (_size + cache.size > _maxCacheSize) {
+      _removeCache(_cache.keys.first);
     }
     _cache[key] = cache;
-    size += cache.size;
+    _size += cache.size;
   }
 
   void _removeCache(_CacheKey key) {
-    size -= _cache.remove(key)?.size ?? 0;
+    _size -= _cache.remove(key)?.size ?? 0;
   }
 
   void clear() {
     _cache.clear();
-    size = 0;
-  }
-
-  @override
-  void onError(DioException err, ErrorInterceptorHandler handler) {
-    if (err.requestOptions.method != "GET") {
-      return handler.next(err);
-    }
-    return handler.next(err);
+    _size = 0;
   }
 
   @override
@@ -78,6 +68,12 @@ class NetworkCacheManager implements Interceptor {
     if (options.method != "GET") {
       return handler.next(options);
     }
+    // RetryInterceptor can replay these options after the internal header has
+    // been removed, so keep the directive for the lifetime of the request.
+    final cacheTime = options.extra.putIfAbsent(
+      _cacheDirectiveKey,
+      () => options.headers.remove('cache-time'),
+    );
     if (!options.extra.containsKey(resolvedProxyKey)) {
       options.extra[resolvedProxyKey] = await getProxy(
         uri: options.uri,
@@ -85,24 +81,38 @@ class NetworkCacheManager implements Interceptor {
       );
     }
     final key = _key(options);
-    var cache = _cache[key];
+    if (cacheTime == 'no') {
+      _removeCache(key);
+      return handler.next(options);
+    }
+    final cache = _cache[key];
     if (cache == null ||
         !compareHeaders(options.headers, cache.requestHeaders)) {
-      if (options.headers['cache-time'] != null) {
-        options.headers.remove('cache-time');
-      }
       return handler.next(options);
-    } else {
-      if (options.headers['cache-time'] == 'no') {
-        options.headers.remove('cache-time');
-        _removeCache(key);
-        return handler.next(options);
+    }
+
+    final age = DateTime.now().difference(cache.time);
+    var canReuse =
+        age < const Duration(seconds: 5) ||
+        (cacheTime == 'long' && age < const Duration(hours: 6));
+    if (!canReuse && age < const Duration(hours: 2)) {
+      final head = options.copyWith(
+        method: 'HEAD',
+        responseType: ResponseType.plain,
+      )..data = null;
+      try {
+        final response = await (_dio ?? AppDio()).fetch(head);
+        canReuse =
+            response.statusCode == 200 &&
+            compareHeaders(cache.responseHeaders, response.headers.map);
+      } on DioException catch (error) {
+        if (CancelToken.isCancel(error)) {
+          return handler.reject(error.copyWith(requestOptions: options));
+        }
+        // HEAD is optional. Some servers reject it even when GET works.
       }
     }
-    var time = DateTime.now();
-    var diff = time.difference(cache.time);
-    if (options.headers['cache-time'] == 'long' &&
-        diff < const Duration(hours: 6)) {
+    if (canReuse && identical(_cache[key], cache)) {
       return handler.resolve(Response(
         requestOptions: options,
         data: cache.data,
@@ -110,32 +120,10 @@ class NetworkCacheManager implements Interceptor {
           ..set('venera-cache', 'true'),
         statusCode: 200,
       ));
-    } else if (diff < const Duration(seconds: 5)) {
-      return handler.resolve(Response(
-        requestOptions: options,
-        data: cache.data,
-        headers: Headers.fromMap(cache.responseHeaders)
-          ..set('venera-cache', 'true'),
-        statusCode: 200,
-      ));
-    } else if (diff < const Duration(hours: 2)) {
-      var o = options.copyWith(
-        method: "HEAD",
-      );
-      var dio = AppDio();
-      var response = await dio.fetch(o);
-      if (response.statusCode == 200 &&
-          compareHeaders(cache.responseHeaders, response.headers.map)) {
-        return handler.resolve(Response(
-          requestOptions: options,
-          data: cache.data,
-          headers: Headers.fromMap(cache.responseHeaders)
-            ..set('venera-cache', 'true'),
-          statusCode: 200,
-        ));
-      }
     }
-    _removeCache(key);
+    if (identical(_cache[key], cache)) {
+      _removeCache(key);
+    }
     handler.next(options);
   }
 
@@ -187,7 +175,8 @@ class NetworkCacheManager implements Interceptor {
   @override
   void onResponse(
       Response<dynamic> response, ResponseInterceptorHandler handler) {
-    if (response.requestOptions.method != "GET") {
+    if (response.requestOptions.method != "GET" ||
+        response.requestOptions.extra[_cacheDirectiveKey] == 'no') {
       return handler.next(response);
     }
     if (response.statusCode != null && response.statusCode! >= 400) {
