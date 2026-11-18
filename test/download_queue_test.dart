@@ -25,6 +25,7 @@ void main() {
     App.dataPath = directory.path;
     queue = File('${directory.path}/downloading_tasks.json');
     manager.downloadingTasks.clear();
+    source.loadComicInfo = null;
     source.loadComicPages = null;
     source.getImageLoadingConfig = null;
     ComicSourceManager().add(source);
@@ -321,6 +322,82 @@ void main() {
     expect(stored.map((entry) => entry['comicId']), ['grouped', 'next']);
   });
 
+  test('canceling an active image task starts the next queued task', () async {
+    final pending = Completer<Res<ComicDetails>>();
+    source.loadComicInfo = (_) => pending.future;
+    final active = images('active');
+    final next = _QueuedImageTask(source);
+    manager.downloadingTasks.addAll([active, next]);
+    active.resume();
+    expect(active.isPaused, isFalse);
+
+    await active.cancel();
+    pending.complete(Res(archive('active').comic));
+    expect(manager.downloadingTasks.single, same(next));
+    expect(next.startCount, 1);
+    final saved = jsonDecode(await queue.readAsString()) as List;
+    expect(saved.single['comicId'], next.id);
+    await active.cancel();
+    expect(next.startCount, 1);
+  });
+
+  test('canceling an active archive starts the next queued task', () async {
+    final active = archive('active')..path = null;
+    final next = _QueuedImageTask(source);
+    manager.downloadingTasks.addAll([active, next]);
+    active.resume();
+
+    await active.cancel();
+    expect(manager.downloadingTasks.single, same(next));
+    expect(next.startCount, 1);
+  });
+
+  test('canceling a paused first task leaves the queue paused', () async {
+    final paused = images('paused');
+    final next = _QueuedImageTask(source);
+    manager.downloadingTasks.addAll([paused, next]);
+
+    await paused.cancel();
+    expect(manager.downloadingTasks.single, same(next));
+    expect(next.startCount, 0);
+  });
+
+  test('moving a queued task to the front pauses the active task', () async {
+    final first = _QueuedImageTask(source, id: 'first')..resume();
+    final next = _QueuedImageTask(source);
+    manager.downloadingTasks.addAll([first, next]);
+
+    manager.moveToFirst(next);
+    expect(manager.downloadingTasks, [same(next), same(first)]);
+    expect(first.isPaused, isTrue);
+    expect(next.startCount, 1);
+    await manager.saveCurrentDownloadingTasks();
+  });
+
+  test('a stale move never reinserts a task or replaces its new instance', () {
+    final old = images('same');
+    manager.moveToFirst(old);
+    expect(manager.downloadingTasks, isEmpty);
+
+    final first = images('first');
+    final current = images('same');
+    manager.downloadingTasks.addAll([first, current]);
+    manager.moveToFirst(old);
+    expect(manager.downloadingTasks, [same(first), same(current)]);
+  });
+
+  test('a stale archive cancel preserves the output and its replacement', () async {
+    final old = archive('same');
+    final output = await Directory(old.path!).create();
+    final page = await File('${output.path}/page.png').writeAsString('saved');
+    final current = archive('same');
+    manager.downloadingTasks.add(current);
+
+    await old.cancel();
+    expect(await page.readAsString(), 'saved');
+    expect(manager.downloadingTasks.single, same(current));
+  });
+
   test('overlapping saves keep the latest complete queue', () async {
     final saves = <Future<bool>>[];
     for (var i = 0; i < 12; i++) {
@@ -380,6 +457,9 @@ class _FixtureSource implements ComicSource {
   LoadComicPagesFunc? loadComicPages;
 
   @override
+  LoadComicFunc? loadComicInfo;
+
+  @override
   GetImageLoadingConfigFunc? getImageLoadingConfig;
 
   @override
@@ -399,10 +479,20 @@ class _FixtureCache implements CacheManager {
 }
 
 class _QueuedImageTask extends ImagesDownloadTask {
-  _QueuedImageTask(ComicSource source) : super(source: source, comicId: 'next');
+  _QueuedImageTask(ComicSource source, {String id = 'next'})
+    : super(source: source, comicId: id);
 
   int startCount = 0;
 
   @override
-  void resume() => startCount++;
+  bool isPaused = true;
+
+  @override
+  void pause() => isPaused = true;
+
+  @override
+  void resume() {
+    startCount++;
+    isPaused = false;
+  }
 }

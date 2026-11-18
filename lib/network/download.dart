@@ -32,7 +32,7 @@ abstract class DownloadTask with ChangeNotifier {
   /// bytes per second
   int get speed;
 
-  void cancel();
+  Future<void> cancel();
 
   void pause();
 
@@ -106,8 +106,10 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   });
 
   @override
-  void cancel() async {
-    if (_discarded) return;
+  Future<void> cancel() async {
+    final manager = LocalManager();
+    if (_discarded || !manager.containsDownloadTask(this)) return;
+    final wasRunning = _isRunning;
     _discarded = true;
     _isRunning = false;
     stopRecorder();
@@ -116,7 +118,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       await _waitForWorkers();
       final downloadPath = path;
       if (downloadPath == null) return;
-      final local = LocalManager().find(id, comicType);
+      final local = manager.find(id, comicType);
       if (local == null) {
         await Directory(downloadPath).deleteIfExists(recursive: true);
       } else {
@@ -139,7 +141,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
     } on FileSystemException catch (error, stack) {
       Log.error('Download', 'Failed to delete download files: $error', stack);
     } finally {
-      LocalManager().removeTask(this);
+      await manager.removeTask(this, resumeNext: wasRunning);
     }
   }
 
@@ -703,8 +705,10 @@ class ArchiveDownloadTask extends DownloadTask {
   }
 
   @override
-  void cancel() async {
-    if (_discarded) return;
+  Future<void> cancel() async {
+    final manager = LocalManager();
+    if (_discarded || !manager.containsDownloadTask(this)) return;
+    final wasRunning = _isRunning;
     _discarded = true;
     ++_runId;
     _isRunning = false;
@@ -715,7 +719,7 @@ class ArchiveDownloadTask extends DownloadTask {
       await Directory(path!).deleteIgnoreError(recursive: true);
     }
     path = null;
-    LocalManager().removeTask(this);
+    await manager.removeTask(this, resumeNext: wasRunning);
   }
 
   @override

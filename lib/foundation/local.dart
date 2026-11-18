@@ -476,6 +476,12 @@ class LocalManager with ChangeNotifier {
         .any((element) => element.id == id && element.comicType == type);
   }
 
+  int _downloadTaskIndex(DownloadTask task) =>
+      downloadingTasks.indexWhere((entry) => identical(entry, task));
+
+  /// Checks whether this task instance is still in the queue.
+  bool containsDownloadTask(DownloadTask task) => _downloadTaskIndex(task) >= 0;
+
   Future<Directory> findValidDirectory(
       String id, ComicType type, String name) async {
     var comic = find(id, type);
@@ -491,33 +497,32 @@ class LocalManager with ChangeNotifier {
   }
 
   Future<bool> completeTask(DownloadTask task) {
+    if (!containsDownloadTask(task)) return Future.value(false);
     final comic = task.toLocalComic();
     _writeComic(comic, comic.id);
-    downloadingTasks.remove(task);
+    return removeTask(task, resumeNext: true);
+  }
+
+  Future<bool> removeTask(DownloadTask task, {bool resumeNext = false}) {
+    final index = _downloadTaskIndex(task);
+    if (index < 0) return Future.value(false);
+    downloadingTasks.removeAt(index);
     notifyListeners();
     final saved = saveCurrentDownloadingTasks();
-    downloadingTasks.firstOrNull?.resume();
+    if (resumeNext && index == 0) downloadingTasks.firstOrNull?.resume();
     return saved;
   }
 
-  void removeTask(DownloadTask task) {
-    downloadingTasks.remove(task);
+  void moveToFirst(DownloadTask task) {
+    final index = _downloadTaskIndex(task);
+    if (index <= 0) return;
+    final first = downloadingTasks.first;
+    final shouldResume = !first.isPaused;
+    downloadingTasks.insert(0, downloadingTasks.removeAt(index));
+    first.pause();
     notifyListeners();
     saveCurrentDownloadingTasks();
-  }
-
-  void moveToFirst(DownloadTask task) {
-    if (downloadingTasks.first != task) {
-      var shouldResume = !downloadingTasks.first.isPaused;
-      downloadingTasks.first.pause();
-      downloadingTasks.remove(task);
-      downloadingTasks.insert(0, task);
-      notifyListeners();
-      saveCurrentDownloadingTasks();
-      if (shouldResume) {
-        downloadingTasks.first.resume();
-      }
-    }
+    if (shouldResume) downloadingTasks.firstOrNull?.resume();
   }
 
   Future<bool> saveCurrentDownloadingTasks() async {
