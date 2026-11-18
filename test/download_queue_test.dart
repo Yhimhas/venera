@@ -88,6 +88,18 @@ void main() {
     return task;
   }
 
+  Future<void> waitForTaskError(DownloadTask task) {
+    final failed = Completer<void>();
+    void onUpdate() {
+      if (task.isError && !failed.isCompleted) failed.complete();
+    }
+
+    task.addListener(onUpdate);
+    addTearDown(() => task.removeListener(onUpdate));
+    onUpdate();
+    return failed.future.timeout(const Duration(seconds: 2));
+  }
+
   test('a saved archive is restored paused with its URL and path', () async {
     final original = archive('archive');
     await queue.writeAsString(jsonEncode([original.toJson()]));
@@ -223,11 +235,7 @@ void main() {
     final task = pageDownload(['page'], (_) async {
       throw StateError('Cache read failed');
     });
-    final failed = Completer<void>();
-    task.addListener(() {
-      if (task.isError && !failed.isCompleted) failed.complete();
-    });
-    await failed.future.timeout(const Duration(seconds: 2));
+    await waitForTaskError(task);
 
     final worker = task.tasks.values.single;
     expect(await worker.wait().timeout(const Duration(seconds: 2)), same(worker));
@@ -257,6 +265,60 @@ void main() {
     await nextPage.future.timeout(const Duration(seconds: 2));
     expect(await File('${App.dataPath}/a/0.png').readAsBytes(), bytes);
     expect(sourceRequests, isEmpty);
+  });
+
+  test('an unavailable chapter folder leaves the download retryable', () async {
+    final blocked = await File('${App.dataPath}/a').writeAsString('keep me');
+    final lookupStarted = Completer<void>();
+    final cacheLookup = Completer<File?>();
+    final task = pageDownload(['page'], (_) {
+      lookupStarted.complete();
+      return cacheLookup.future;
+    });
+
+    await waitForTaskError(task);
+    expect(task.message, contains('download directory'));
+    expect(manager.downloadingTasks.single, same(task));
+    expect(task.progress, 0);
+    expect(lookupStarted.isCompleted, isFalse);
+    expect(await blocked.readAsString(), 'keep me');
+
+    await blocked.rename('${blocked.path}.original');
+    task.resume();
+    await lookupStarted.future.timeout(const Duration(seconds: 2));
+    final worker = task.tasks.values.single;
+    task.pause();
+    cacheLookup.complete(null);
+    await worker.wait().timeout(const Duration(seconds: 2));
+    expect(task.isError, isFalse);
+    expect(await Directory(blocked.path).exists(), isTrue);
+  });
+
+  test('an unavailable local library leaves a finished download queued', () async {
+    final chapter = await Directory('${App.dataPath}/a').create();
+    final page = await File('${chapter.path}/0.png').writeAsString('page bytes');
+    // Run with the local database unavailable and the page already saved.
+    final task = ImagesDownloadTask.fromJson({
+      ...groupedTaskJson(),
+      'chapters': ['a'],
+      'images': {'a': ['page']},
+      'totalCount': 1,
+      'downloadedCount': 1,
+      'index': 1,
+    })!;
+    final next = _QueuedImageTask(source);
+    manager.downloadingTasks.addAll([task, next]);
+    addTearDown(task.pause);
+
+    task.resume();
+    await waitForTaskError(task);
+    expect(task.message, contains('local library'));
+    expect(task.progress, 1);
+    expect(manager.downloadingTasks, [task, next]);
+    expect(next.startCount, 0);
+    expect(await page.readAsString(), 'page bytes');
+    final stored = jsonDecode(await queue.readAsString()) as List;
+    expect(stored.map((entry) => entry['comicId']), ['grouped', 'next']);
   });
 
   test('overlapping saves keep the latest complete queue', () async {
@@ -334,4 +396,13 @@ class _FixtureCache implements CacheManager {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _QueuedImageTask extends ImagesDownloadTask {
+  _QueuedImageTask(ComicSource source) : super(source: source, comicId: 'next');
+
+  int startCount = 0;
+
+  @override
+  void resume() => startCount++;
 }

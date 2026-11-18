@@ -297,15 +297,20 @@ class LocalManager with ChangeNotifier {
   }
 
   Future<void> add(LocalComic comic, [String? id]) async {
-    var old = find(id ?? comic.id, comic.comicType);
-    var downloaded = comic.downloadedChapters;
-    if (old != null) {
-      downloaded.addAll(old.downloadedChapters);
-    }
+    _writeComic(comic, id ?? comic.id);
+    notifyListeners();
+  }
+
+  void _writeComic(LocalComic comic, String id) {
+    final old = find(id, comic.comicType);
+    final downloaded = {
+      ...comic.downloadedChapters,
+      ...?old?.downloadedChapters,
+    };
     _db.execute(
       'INSERT OR REPLACE INTO comics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
       [
-        id ?? comic.id,
+        id,
         comic.title,
         comic.subtitle,
         jsonEncode(comic.tags),
@@ -313,11 +318,10 @@ class LocalManager with ChangeNotifier {
         jsonEncode(comic.chapters),
         comic.cover,
         comic.comicType.value,
-        jsonEncode(downloaded),
+        jsonEncode(downloaded.toList()),
         comic.createdAt.millisecondsSinceEpoch,
       ],
     );
-    notifyListeners();
   }
 
   void remove(String id, ComicType comicType) async {
@@ -487,7 +491,8 @@ class LocalManager with ChangeNotifier {
   }
 
   Future<bool> completeTask(DownloadTask task) {
-    add(task.toLocalComic());
+    final comic = task.toLocalComic();
+    _writeComic(comic, comic.id);
     downloadingTasks.remove(task);
     notifyListeners();
     final saved = saveCurrentDownloadingTasks();

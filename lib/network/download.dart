@@ -209,9 +209,13 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   int get _maxConcurrentTasks =>
       (appdata.settings["downloadThreads"] as num).toInt();
 
-  void _scheduleTasks(int runId) {
+  void _scheduleTasks(
+    int runId,
+    String chapterId,
+    List<String> images,
+    Directory saveTo,
+  ) {
     if (!_isCurrent(runId)) return;
-    var images = _images![_images!.keys.elementAt(_chapter)]!;
     var downloading = 0;
     for (var i = _index; i < images.length; i++) {
       if (downloading >= _maxConcurrentTasks) {
@@ -224,33 +228,13 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         }
         continue;
       }
-      Directory saveTo;
-      if (comic!.chapters != null) {
-        saveTo = Directory(FilePath.join(
-          path!,
-          LocalManager.getChapterDirectoryName(
-            _images!.keys.elementAt(_chapter),
-          ),
-        ));
-        if (!saveTo.existsSync()) {
-          saveTo.createSync(recursive: true);
-        }
-      } else {
-        saveTo = Directory(path!);
-      }
-      var task = _ImageDownloadWrapper(
-        this,
-        _images!.keys.elementAt(_chapter),
-        images[i],
-        saveTo,
-        i,
-      );
+      final task = _ImageDownloadWrapper(this, chapterId, images[i], saveTo, i);
       tasks[i] = task;
       _activeWorkers.add(task);
       task.wait().then((completedTask) {
         _activeWorkers.remove(completedTask);
         if (completedTask.isComplete && identical(tasks[i], completedTask)) {
-          _scheduleTasks(runId);
+          _scheduleTasks(runId, chapterId, images, saveTo);
         }
       });
       downloading++;
@@ -381,32 +365,55 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
     }
 
     while (_chapter < _images!.length) {
-      var images = _images![_images!.keys.elementAt(_chapter)]!;
+      final chapterId = _images!.keys.elementAt(_chapter);
+      final images = _images![chapterId]!;
       tasks.clear();
-      while (_index < images.length) {
-        _scheduleTasks(runId);
-        var task = tasks[_index]!;
-        await task.wait();
-        if (!_isCurrent(runId)) {
+      if (_index < images.length) {
+        final Directory saveTo;
+        try {
+          final directoryPath = comic!.chapters == null
+              ? path!
+              : FilePath.join(
+                  path!,
+                  LocalManager.getChapterDirectoryName(chapterId),
+                );
+          saveTo = Directory(directoryPath);
+          if (!saveTo.existsSync()) saveTo.createSync(recursive: true);
+        } catch (error, stack) {
+          final message = 'Failed to prepare download directory: $error';
+          Log.error('Download', message, stack);
+          _setError(message);
           return;
         }
-        if (task.error != null) {
-          Log.error("Download", task.error.toString());
-          _setError("Error: ${task.error}");
-          return;
+        while (_index < images.length) {
+          _scheduleTasks(runId, chapterId, images, saveTo);
+          final task = tasks[_index]!;
+          await task.wait();
+          if (!_isCurrent(runId)) return;
+          if (task.error != null) {
+            Log.error("Download", task.error.toString());
+            _setError("Error: ${task.error}");
+            return;
+          }
+          _index++;
+          _downloadedCount++;
+          _message = "$_downloadedCount/$_totalCount";
+          await LocalManager().saveCurrentDownloadingTasks();
+          if (!_isCurrent(runId)) return;
         }
-        _index++;
-        _downloadedCount++;
-        _message = "$_downloadedCount/$_totalCount";
-        await LocalManager().saveCurrentDownloadingTasks();
-        if (!_isCurrent(runId)) return;
       }
       _index = 0;
       _chapter++;
     }
 
-    LocalManager().completeTask(this);
     stopRecorder();
+    try {
+      await LocalManager().completeTask(this);
+    } catch (error, stack) {
+      final message = 'Failed to add download to the local library: $error';
+      Log.error('Download', message, stack);
+      _setError(message);
+    }
   }
 
   @override
