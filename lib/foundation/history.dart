@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File;
 import 'dart:isolate';
 import 'dart:math';
 import 'dart:ffi' as ffi;
@@ -188,6 +189,7 @@ class HistoryManager with ChangeNotifier {
 
   late Database _db;
   Future<void> _pendingWrites = Future.value();
+  Future<void> _pendingRestores = Future.value();
   Future<void>? _closing;
 
   int get length => _db.select("select count(*) from history;").first[0] as int;
@@ -234,6 +236,9 @@ class HistoryManager with ChangeNotifier {
 
   static const _historyColumns =
       'id, title, subtitle, cover, time, type, ep, page, readEpisode, max_page';
+  static const _imageFavoriteColumns =
+      'id, title, sub_title, author, tags, translated_tags, time, max_page, '
+      'source_key, image_favorites_ep, other';
 
   void _initHistoryTable() {
     _db.execute('BEGIN IMMEDIATE');
@@ -448,6 +453,72 @@ void clearUnfavoritedHistory() {
         .whenComplete(() => _closing = null);
     _closing = closed;
     return closed;
+  }
+
+  Future<void> restoreFromBackup(File backup) {
+    final restore = _pendingRestores.then((_) => _restoreFromBackup(backup));
+    _pendingRestores = restore.catchError((Object _) {});
+    return restore;
+  }
+
+  Future<void> _restoreFromBackup(File backup) async {
+    final historyPath = '${App.dataPath}/history.db';
+    final backupUri = backup.absolute.uri.replace(
+      queryParameters: {'mode': 'ro'},
+    );
+    await init();
+    await close();
+    try {
+      final database = sqlite3.open(
+        historyPath,
+        mode: OpenMode.readWrite,
+        uri: true,
+      );
+      try {
+        _restoreBackup(database, backupUri);
+      } finally {
+        database.dispose();
+      }
+    } finally {
+      await init();
+    }
+  }
+
+  static void _restoreBackup(Database database, Uri backupUri) {
+    database.execute('ATTACH DATABASE ? AS incoming', [backupUri.toString()]);
+    database.execute('BEGIN');
+    try {
+      final integrity = database.select('PRAGMA incoming.quick_check(1)');
+      if (integrity.firstOrNull?[0] != 'ok') {
+        throw const FormatException('Invalid reading history backup');
+      }
+      final tables = database
+          .select("SELECT name FROM incoming.sqlite_schema WHERE type = 'table'")
+          .map((row) => row['name'])
+          .toSet();
+      if (!tables.contains('history')) {
+        throw const FormatException('Backup has no reading history table');
+      }
+      final columns = database.select('PRAGMA incoming.table_info(history)');
+      final hasChapterGroup = columns.any((column) => column['name'] == 'chapter_group');
+      final groupColumn = hasChapterGroup ? 'chapter_group' : 'NULL';
+      database.execute('DELETE FROM main.history');
+      database.execute('''
+        INSERT INTO main.history ($_historyColumns, chapter_group)
+        SELECT $_historyColumns, $groupColumn FROM incoming.history
+      ''');
+      database.execute('DELETE FROM main.image_favorites');
+      if (tables.contains('image_favorites')) {
+        database.execute('''
+          INSERT INTO main.image_favorites ($_imageFavoriteColumns)
+          SELECT $_imageFavoriteColumns FROM incoming.image_favorites
+        ''');
+      }
+      database.execute('COMMIT');
+    } catch (_) {
+      if (!database.autocommit) database.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   void batchDeleteHistories(List<ComicID> histories) {

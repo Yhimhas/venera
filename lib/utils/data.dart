@@ -45,12 +45,8 @@ Future<File> exportAppData([bool sync = true]) async {
 }
 
 Future<void> importAppData(File file, [bool checkVersion = false]) async {
-  var cacheDirPath = FilePath.join(App.cachePath, 'temp_data');
-  var cacheDir = Directory(cacheDirPath);
-  if (cacheDir.existsSync()) {
-    cacheDir.deleteSync(recursive: true);
-  }
-  cacheDir.createSync();
+  final cacheDir = await Directory(App.cachePath).createTemp('venera-import-');
+  final cacheDirPath = cacheDir.path;
   try {
     await Isolate.run(() {
       ZipFile.openAndExtract(file.path, cacheDirPath);
@@ -67,11 +63,7 @@ Future<void> importAppData(File file, [bool checkVersion = false]) async {
       }
     }
     if (await historyFile.exists()) {
-      final history = HistoryManager();
-      await history.close();
-      File(FilePath.join(App.dataPath, "history.db")).deleteIfExistsSync();
-      historyFile.renameSync(FilePath.join(App.dataPath, "history.db"));
-      await history.init();
+      await HistoryManager().restoreFromBackup(historyFile);
     }
     if (await localFavoriteFile.exists()) {
       LocalFavoritesManager().close();
@@ -109,7 +101,7 @@ Future<void> importAppData(File file, [bool checkVersion = false]) async {
       await ComicSourceManager().reload();
     }
   } finally {
-    cacheDir.deleteIgnoreError(recursive: true);
+    await cacheDir.deleteIgnoreError(recursive: true);
   }
 }
 

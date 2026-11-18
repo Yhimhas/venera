@@ -155,6 +155,158 @@ void main() {
       expect(manager.find(id, firstType)?.page, 9);
     });
 
+    group('backup restore', () {
+      late File backup;
+      late String favoriteSchema;
+
+      void saveFavorite(Database database, String id) {
+        database.execute(
+          "INSERT INTO image_favorites VALUES (?, 'Fixture', '', '', '[]', "
+          "'[]', 1, 0, 'local', '[]', '{}')",
+          [id],
+        );
+      }
+
+      setUp(() async {
+        await manager.init();
+        manager.addHistory(progress(firstType, 4));
+        backup = File('${File(dbPath).parent.path}/reading history #1.db');
+        final current = sqlite3.open(dbPath);
+        try {
+          favoriteSchema =
+              current
+                      .select(
+                        "SELECT sql FROM sqlite_schema WHERE name = 'image_favorites'",
+                      )
+                      .single['sql']
+                  as String;
+          saveFavorite(current, 'original');
+        } finally {
+          current.dispose();
+        }
+      });
+
+      List<String> favoriteIds() {
+        final current = sqlite3.open(dbPath, mode: OpenMode.readOnly);
+        try {
+          return current
+              .select('SELECT id FROM image_favorites')
+              .map((row) => row['id'] as String)
+              .toList();
+        } finally {
+          current.dispose();
+        }
+      }
+
+      void buildLegacyBackup(File target, {String? imageSchema, int page = 9}) {
+        final database = sqlite3.open(target.path);
+        try {
+          database.execute('''
+            CREATE TABLE history (
+              id TEXT PRIMARY KEY, title TEXT, subtitle TEXT, cover TEXT,
+              time INT, type INT, ep INT, page INT, readEpisode TEXT, max_page INT
+            );
+          ''');
+          database.execute(
+            "INSERT INTO history VALUES (?, 'From backup', '', '', 10, ?, 3, ?, '3', 15)",
+            [id, secondType.value, page],
+          );
+          if (imageSchema != null) {
+            database.execute(imageSchema);
+            if (imageSchema == favoriteSchema) {
+              saveFavorite(database, 'restored');
+            }
+          }
+        } finally {
+          database.dispose();
+        }
+      }
+
+      test('a corrupted backup leaves existing history available', () async {
+        await backup.writeAsString('This is not a SQLite database');
+
+        await expectLater(
+          manager.restoreFromBackup(backup),
+          throwsA(isA<SqliteException>()),
+        );
+        expect(manager.isInitialized, isTrue);
+        expect(manager.find(id, firstType)?.page, 4);
+        expect(favoriteIds(), ['original']);
+      });
+
+      test(
+        'a different SQLite database is rejected without clearing history',
+        () async {
+          final unrelated = sqlite3.open(backup.path);
+          unrelated.execute('CREATE TABLE unrelated (id TEXT PRIMARY KEY)');
+          unrelated.dispose();
+
+          await expectLater(
+            manager.restoreFromBackup(backup),
+            throwsFormatException,
+          );
+          expect(manager.find(id, firstType)?.page, 4);
+          expect(favoriteIds(), ['original']);
+        },
+      );
+
+      test(
+        'a failed image favorite restore also rolls back reading history',
+        () async {
+          buildLegacyBackup(
+            backup,
+            imageSchema: 'CREATE TABLE image_favorites (id TEXT PRIMARY KEY)',
+          );
+
+          await expectLater(
+            manager.restoreFromBackup(backup),
+            throwsA(isA<SqliteException>()),
+          );
+          expect(manager.find(id, firstType)?.page, 4);
+          expect(manager.find(id, secondType), isNull);
+          expect(favoriteIds(), ['original']);
+        },
+      );
+
+      test(
+        'restores legacy progress and image favorites as one operation',
+        () async {
+          buildLegacyBackup(backup, imageSchema: favoriteSchema);
+          final originalBackup = await backup.readAsBytes();
+          expect(manager.find(id, firstType)?.page, 4);
+
+          await manager.restoreFromBackup(backup);
+          expect(manager.find(id, firstType), isNull);
+          final restored = manager.find(id, secondType)!;
+          expect(restored.page, 9);
+          expect(restored.ep, 3);
+          expect(restored.group, isNull);
+          expect(restored.readEpisode, {'3'});
+          expect(favoriteIds(), ['restored']);
+          expect(await backup.readAsBytes(), originalBackup);
+        },
+      );
+
+      test('overlapping restores refresh the cache in request order', () async {
+        buildLegacyBackup(backup);
+        final nextBackup = File('$dbPath.next');
+        buildLegacyBackup(nextBackup, page: 12);
+        final openedPages = <int?>[];
+        void recordPage() =>
+            openedPages.add(manager.find(id, secondType)?.page);
+        manager.addListener(recordPage);
+        addTearDown(() => manager.removeListener(recordPage));
+
+        await Future.wait([
+          manager.restoreFromBackup(backup),
+          manager.restoreFromBackup(nextBackup),
+        ]);
+        expect(openedPages, [9, 12]);
+        expect(manager.find(id, secondType)?.page, 12);
+        expect(favoriteIds(), isEmpty);
+      });
+    });
+
     group('async progress', skip: asyncSkipReason, () {
       test(
         'keeps existing metadata when a reader saves an older snapshot',
