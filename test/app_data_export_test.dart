@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/pages/reader/history_saver.dart';
 import 'package:venera/utils/data.dart';
 import 'package:zip_flutter/zip_flutter.dart';
 
@@ -76,6 +77,20 @@ void main() {
       return directory;
     }
 
+    Future<int> readArchivedPage(File archive) async {
+      final unpacked = await extract(archive);
+      final snapshot = sqlite3.open(
+        '${unpacked.path}/history.db',
+        mode: OpenMode.readOnly,
+      );
+      try {
+        expect(snapshot.select('PRAGMA quick_check').single[0], 'ok');
+        return snapshot.select('SELECT page FROM history').single[0] as int;
+      } finally {
+        snapshot.dispose();
+      }
+    }
+
     test('includes queued reading progress stored in SQLite WAL', () async {
       history.addHistory(progress(4));
       final live = sqlite3.open('${App.dataPath}/history.db');
@@ -85,18 +100,24 @@ void main() {
       final archive = await exportAppData(sync: false);
       await write;
 
-      final unpacked = await extract(archive);
-      final snapshot = sqlite3.open(
-        '${unpacked.path}/history.db',
-        mode: OpenMode.readOnly,
-      );
-      try {
-        expect(snapshot.select('PRAGMA quick_check').single[0], 'ok');
-        expect(snapshot.select('SELECT page FROM history').single[0], 8);
-      } finally {
-        snapshot.dispose();
-      }
+      expect(await readArchivedPage(archive), 8);
     });
+
+    test(
+      'reader exit exports the last page before the debounce timer fires',
+      () async {
+        history.addHistory(progress(4));
+        final saver = ReaderHistorySaver(history.addHistoryAsync);
+        saver.schedule(progress(9));
+        Future<File>? archive;
+        await saver.close(() {
+          archive = exportAppData(sync: false);
+        });
+
+        expect(archive, isNotNull);
+        expect(await readArchivedPage(await archive!), 9);
+      },
+    );
 
     test('back-to-back exports produce independent archives', () async {
       final archives = await Future.wait([

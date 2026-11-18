@@ -32,6 +32,7 @@ import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/pages/reader/history_saver.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/clipboard_image.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -277,9 +278,7 @@ class _ReaderState extends State<Reader>
     focusNode.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     stopVolumeEvent();
-    Future.microtask(() {
-      DataSync().onDataChanged();
-    });
+    unawaited(_historySaver.close(() => DataSync().onDataChanged()));
     PaintingBinding.instance.imageCache.maximumSizeBytes = 100 << 20;
     disposeReaderWindow();
     super.dispose();
@@ -323,9 +322,9 @@ class _ReaderState extends State<Reader>
     updateHistory();
   }
 
-  /// Prevent multiple history updates in a short time.
-  /// `HistoryManager().addHistoryAsync` is a high-cost operation because it creates a new isolate.
-  Timer? _updateHistoryTimer;
+  late final _historySaver = ReaderHistorySaver(
+    HistoryManager().addHistoryAsync,
+  );
 
   void updateHistory() {
     if (history != null) {
@@ -361,15 +360,7 @@ class _ReaderState extends State<Reader>
         history!.ep = chapter;
       }
       history!.time = DateTime.now();
-      _updateHistoryTimer?.cancel();
-      _updateHistoryTimer = Timer(const Duration(seconds: 1), () async {
-        _updateHistoryTimer = null;
-        try {
-          await HistoryManager().addHistoryAsync(history!);
-        } catch (error, stack) {
-          Log.error('History', 'Failed to save reading progress: $error', stack);
-        }
-      });
+      _historySaver.schedule(history!);
     }
   }
 
