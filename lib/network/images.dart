@@ -131,8 +131,19 @@ abstract class ImageDownloader {
   }
 
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
-      String imageKey, String? sourceKey, String cid, String eid) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid);
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid, {
+    CancelToken? cancelToken,
+  }) {
+    return _loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      cancelToken: cancelToken,
+    );
   }
 
   static Stream<ImageDownloadProgress> _loadComicImage(
@@ -142,8 +153,10 @@ abstract class ImageDownloader {
     String eid, {
     CancelToken? cancelToken,
   }) async* {
+    if (cancelToken?.isCancelled == true) return;
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final cache = await CacheManager().findCache(cacheKey);
+    if (cancelToken?.isCancelled == true) return;
 
     if (cache != null) {
       var data = await cache.readAsBytes();
@@ -163,6 +176,7 @@ abstract class ImageDownloader {
               ?.call(imageKey, cid, eid)) ??
           {};
     }
+    if (cancelToken?.isCancelled == true) return;
     var retryLimit = 5;
     while (true) {
       try {

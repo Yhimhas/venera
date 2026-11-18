@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/res.dart';
@@ -24,6 +26,7 @@ void main() {
     queue = File('${directory.path}/downloading_tasks.json');
     manager.downloadingTasks.clear();
     source.loadComicPages = null;
+    source.getImageLoadingConfig = null;
     ComicSourceManager().add(source);
     addTearDown(() => ComicSourceManager().remove(source.key));
   });
@@ -60,6 +63,30 @@ void main() {
     'path': App.dataPath,
     'cover': 'file://${App.dataPath}/cover.png',
   };
+
+  ImagesDownloadTask pageDownload(
+    List<String> pages,
+    Future<File?> Function(String) findCache,
+  ) {
+    final previousCache = CacheManager.instance;
+    final previousThreads = appdata.settings['downloadThreads'];
+    CacheManager.instance = _FixtureCache(findCache);
+    appdata.settings['downloadThreads'] = 1;
+    addTearDown(() {
+      CacheManager.instance = previousCache;
+      appdata.settings['downloadThreads'] = previousThreads;
+    });
+    final task = ImagesDownloadTask.fromJson({
+      ...groupedTaskJson(),
+      'chapters': ['a'],
+      'images': {'a': pages},
+      'totalCount': pages.length,
+    })!;
+    manager.downloadingTasks.add(task);
+    addTearDown(task.pause);
+    task.resume();
+    return task;
+  }
 
   test('a saved archive is restored paused with its URL and path', () async {
     final original = archive('archive');
@@ -169,6 +196,69 @@ void main() {
     expect(complete['downloadedCount'], 1);
   });
 
+  test('a paused page worker settles when its pending cache check returns', () async {
+    final checkingCache = Completer<void>();
+    final cachedFile = Completer<File?>();
+    var sourceRequests = 0;
+    source.getImageLoadingConfig = (_, _, _) async {
+      sourceRequests++;
+      throw StateError('Paused page reached the source');
+    };
+    final task = pageDownload(['page'], (_) {
+      checkingCache.complete();
+      return cachedFile.future;
+    });
+    await checkingCache.future.timeout(const Duration(seconds: 2));
+    final worker = task.tasks.values.single;
+    final stopped = worker.wait();
+
+    task.pause();
+    cachedFile.complete(null);
+    await stopped.timeout(const Duration(seconds: 2));
+    expect(worker.isComplete, isFalse);
+    expect(sourceRequests, 0);
+  });
+
+  test('a worker that already failed also releases later waiters', () async {
+    final task = pageDownload(['page'], (_) async {
+      throw StateError('Cache read failed');
+    });
+    final failed = Completer<void>();
+    task.addListener(() {
+      if (task.isError && !failed.isCompleted) failed.complete();
+    });
+    await failed.future.timeout(const Duration(seconds: 2));
+
+    final worker = task.tasks.values.single;
+    expect(await worker.wait().timeout(const Duration(seconds: 2)), same(worker));
+    expect(worker.error, contains('Cache read failed'));
+  });
+
+  test('a page saved from cache does not start a second transfer', () async {
+    final bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    final cached = await File('${App.dataPath}/cached.png').writeAsBytes(bytes);
+    final nextPage = Completer<void>();
+    final pending = Completer<File?>();
+    final sourceRequests = <String>[];
+    source.getImageLoadingConfig = (image, _, _) async {
+      sourceRequests.add(image);
+      throw StateError('Unexpected source request');
+    };
+    final task = pageDownload(['cached', 'pending'], (key) async {
+      if (key.startsWith('cached@')) return cached;
+      if (!nextPage.isCompleted) nextPage.complete();
+      return pending.future;
+    });
+    addTearDown(() {
+      task.pause();
+      if (!pending.isCompleted) pending.complete(null);
+    });
+
+    await nextPage.future.timeout(const Duration(seconds: 2));
+    expect(await File('${App.dataPath}/a/0.png').readAsBytes(), bytes);
+    expect(sourceRequests, isEmpty);
+  });
+
   test('overlapping saves keep the latest complete queue', () async {
     final saves = <Future<bool>>[];
     for (var i = 0; i < 12; i++) {
@@ -226,6 +316,21 @@ class _FixtureSource implements ComicSource {
 
   @override
   LoadComicPagesFunc? loadComicPages;
+
+  @override
+  GetImageLoadingConfigFunc? getImageLoadingConfig;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FixtureCache implements CacheManager {
+  _FixtureCache(this._find);
+
+  final Future<File?> Function(String) _find;
+
+  @override
+  Future<File?> findCache(String key) => _find(key);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
