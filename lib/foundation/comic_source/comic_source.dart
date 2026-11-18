@@ -11,6 +11,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/res.dart';
+import 'package:venera/network/app_dio.dart' show CancelToken;
 import 'package:venera/pages/category_comics_page.dart';
 import 'package:venera/pages/search_result_page.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -21,6 +22,7 @@ import 'package:venera/utils/translations.dart';
 
 import '../js_engine.dart';
 import '../log.dart';
+import 'source_repo.dart';
 
 part 'category.dart';
 
@@ -34,6 +36,7 @@ part 'types.dart';
 
 class ComicSourceManager with ChangeNotifier, Init {
   final List<ComicSource> _sources = [];
+  final Set<String> _updating = {};
 
   static ComicSourceManager? _instance;
 
@@ -88,6 +91,66 @@ class ComicSourceManager with ChangeNotifier, Init {
   void remove(String key) {
     _sources.removeWhere((element) => element.key == key);
     notifyListeners();
+  }
+
+  Future<void> updateSource(
+    ComicSource source, {
+    CancelToken? cancelToken,
+  }) async {
+    if (!source.url.isURL) {
+      throw Exception('Invalid url config');
+    }
+    if (!identical(find(source.key), source)) {
+      throw StateError('Source ${source.key} is no longer installed');
+    }
+    if (!_updating.add(source.key)) {
+      throw StateError('Source ${source.key} is already being updated');
+    }
+
+    final parser = ComicSourceParser._forUpdate(source.key);
+    Directory? stagingDirectory;
+    File? stagedFile;
+    try {
+      final script = await SourceRepo.fetchText(
+        source.url,
+        sourceKey: source.key,
+        cancelToken: cancelToken,
+      );
+      if (cancelToken?.cancelError case final error?) throw error;
+
+      stagingDirectory = await File(
+        source.filePath,
+      ).parent.createTemp('.source-update-');
+      final pendingFile = File(
+        FilePath.join(stagingDirectory.path, 'source.js'),
+      );
+      stagedFile = pendingFile;
+      await pendingFile.writeAsString(script, flush: true);
+      if (cancelToken?.cancelError case final error?) throw error;
+
+      final index = _sources.indexOf(source);
+      if (index == -1) {
+        throw StateError('Source ${source.key} is no longer installed');
+      }
+      final replacement = parser._parse(script, source.filePath);
+      parser._commitUpdate(() => pendingFile.renameSync(source.filePath));
+      replacement.data = source.data;
+      _sources[index] = replacement;
+      _availableUpdates.remove(source.key);
+      parser._scheduleInit(replacement);
+      notifyListeners();
+    } finally {
+      _updating.remove(source.key);
+      parser._discardUpdate();
+      try {
+        if (stagedFile != null && await stagedFile.exists()) {
+          await stagedFile.delete();
+        }
+        await stagingDirectory?.delete();
+      } on FileSystemException catch (e) {
+        Log.error('ComicSource', e.toString());
+      }
+    }
   }
 
   bool get isEmpty => _sources.isEmpty;

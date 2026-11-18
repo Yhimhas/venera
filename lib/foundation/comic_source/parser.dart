@@ -51,10 +51,21 @@ class ComicSourceParseException implements Exception {
 }
 
 class ComicSourceParser {
+  ComicSourceParser() : _replacingKey = null;
+
+  ComicSourceParser._forUpdate(this._replacingKey);
+
+  final String? _replacingKey;
+  String? _stagedJs;
+  bool _hasInit = false;
+
   /// comic source key
   String? _key;
 
   String? _name;
+
+  String get _registeredJs => 'ComicSource.sources.$_key';
+  String get _sourceJs => _stagedJs ?? _registeredJs;
 
   Future<ComicSource> createAndParse(String js, String fileName) async {
     if (!fileName.endsWith("js")) {
@@ -84,6 +95,13 @@ class ComicSourceParser {
   }
 
   Future<ComicSource> parse(String js, String filePath) async {
+    final source = _parse(js, filePath);
+    await source.loadData();
+    _scheduleInit(source);
+    return source;
+  }
+
+  ComicSource _parse(String js, String filePath) {
     js = js.replaceAll("\r\n", "\n");
     var line1 = js
         .split('\n')
@@ -95,6 +113,12 @@ class ComicSourceParser {
     }
     var className = line1.split("class")[1].split("extends ComicSource").first;
     className = className.trim();
+    final replacingKey = _replacingKey;
+    if (replacingKey != null) {
+      _stagedJs =
+          'globalThis[${jsonEncode('__veneraSourceUpdate_$replacingKey')}]';
+    }
+    final candidateJs = _stagedJs ?? "this['temp']";
     JsEngine().runCode("""(() => {
         let source;
         const network = _createNetwork(() => source?.key);
@@ -102,20 +126,20 @@ class ComicSourceParser {
         source = ((Network, fetch) => (() => { $js
           return new $className();
         })())(network, fetchForSource);
-        this['temp'] = source;
+        $candidateJs = source;
       }).call()
     """, className);
     _name =
-        JsEngine().runCode("this['temp'].name") ??
+        JsEngine().runCode("$candidateJs.name") ??
         (throw ComicSourceParseException('name is required'));
     var key =
-        JsEngine().runCode("this['temp'].key") ??
+        JsEngine().runCode("$candidateJs.key") ??
         (throw ComicSourceParseException('key is required'));
     var version =
-        JsEngine().runCode("this['temp'].version") ??
+        JsEngine().runCode("$candidateJs.version") ??
         (throw ComicSourceParseException('version is required'));
-    var minAppVersion = JsEngine().runCode("this['temp'].minAppVersion");
-    var url = JsEngine().runCode("this['temp'].url");
+    var minAppVersion = JsEngine().runCode("$candidateJs.minAppVersion");
+    var url = JsEngine().runCode("$candidateJs.url");
     if (minAppVersion != null) {
       if (compareSemVer(minAppVersion, App.version.split('-').first)) {
         throw ComicSourceParseException(
@@ -125,17 +149,20 @@ class ComicSourceParser {
         );
       }
     }
-    for (var source in ComicSource.all()) {
-      if (source.key == key) {
-        throw ComicSourceParseException("key($key) already exists");
-      }
+    if (replacingKey != null && key != replacingKey) {
+      throw ComicSourceParseException(
+        'Expected source key $replacingKey, got $key',
+      );
+    }
+    if (replacingKey == null && ComicSource.find(key) != null) {
+      throw ComicSourceParseException("key($key) already exists");
     }
     _key = key;
     _checkKeyValidation();
 
-    JsEngine().runCode("""
-      ComicSource.sources.$_key = this['temp'];
-    """);
+    if (replacingKey == null) {
+      JsEngine().runCode("$_registeredJs = $candidateJs; void 0;");
+    }
 
     var source = ComicSource(
       _name!,
@@ -173,15 +200,44 @@ class ComicSourceParser {
       _parseArchiveDownloader(),
     );
 
-    await source.loadData();
-
-    if (_checkExists("init")) {
-      Future.delayed(const Duration(milliseconds: 50), () {
-        JsEngine().runCode("ComicSource.sources.$_key.init()");
-      });
-    }
-
+    _hasInit = _checkExists("init");
     return source;
+  }
+
+  void _commitUpdate(void Function() replaceFile) {
+    // Keep the previous JS object until the staged file replaces the installed file.
+    final previousJs =
+        'globalThis[${jsonEncode('__veneraPreviousSource_$_key')}]';
+    final engine = JsEngine();
+    engine.runCode('''
+      $previousJs = $_registeredJs;
+      $_registeredJs = $_stagedJs;
+      void 0;
+    ''');
+    try {
+      replaceFile();
+    } catch (_) {
+      engine.runCode('$_registeredJs = $previousJs; void 0;');
+      rethrow;
+    } finally {
+      engine.runCode('delete $previousJs;');
+    }
+  }
+
+  void _discardUpdate() {
+    final stagedJs = _stagedJs;
+    if (stagedJs == null) return;
+    JsEngine().runCode('delete $stagedJs;');
+    _stagedJs = null;
+  }
+
+  void _scheduleInit(ComicSource source) {
+    if (!_hasInit) return;
+    Future.delayed(const Duration(milliseconds: 50), () {
+      if (identical(ComicSource.find(source.key), source)) {
+        JsEngine().runCode('$_registeredJs.init()');
+      }
+    });
   }
 
   _checkKeyValidation() {
@@ -193,13 +249,13 @@ class ComicSourceParser {
 
   bool _checkExists(String index) {
     return JsEngine().runCode(
-      "ComicSource.sources.$_key.$index !== null "
-      "&& ComicSource.sources.$_key.$index !== undefined",
+      "$_sourceJs.$index !== null "
+      "&& $_sourceJs.$index !== undefined",
     );
   }
 
   dynamic _getValue(String index) {
-    return JsEngine().runCode("ComicSource.sources.$_key.$index");
+    return JsEngine().runCode("$_sourceJs.$index");
   }
 
   AccountConfig? _loadAccountConfig() {
@@ -284,7 +340,7 @@ class ComicSourceParser {
     if (!_checkExists("explore")) {
       return const [];
     }
-    var length = JsEngine().runCode("ComicSource.sources.$_key.explore.length");
+    var length = _getValue("explore.length");
     var pages = <ExplorePageData>[];
     for (int i = 0; i < length; i++) {
       final String title = _getValue("explore[$i].title");

@@ -23,49 +23,26 @@ class ComicSourcePage extends StatelessWidget {
     ComicSource source, [
     bool showLoading = true,
   ]) async {
-    if (!source.url.isURL) {
-      if (showLoading) {
-        App.rootContext.showMessage(message: "Invalid url config");
-        return;
-      } else {
-        throw Exception("Invalid url config");
-      }
-    }
-    ComicSourceManager().remove(source.key);
-    bool cancel = false;
+    final cancelToken = showLoading ? CancelToken() : null;
     LoadingDialogController? controller;
     if (showLoading) {
       controller = showLoadingDialog(
         App.rootContext,
-        onCancel: () => cancel = true,
+        onCancel: cancelToken!.cancel,
         barrierDismissible: false,
       );
     }
     try {
-      var res = await AppDio().get<String>(
-        source.url,
-        options: Options(
-          responseType: ResponseType.plain,
-          headers: {"cache-time": "no"},
-        ),
-      );
-      if (cancel) return;
-      controller?.close();
-      await ComicSourceParser().parse(res.data!, source.filePath);
-      await io.File(source.filePath).writeAsString(res.data!);
-      if (ComicSourceManager().availableUpdates.containsKey(source.key)) {
-        ComicSourceManager().availableUpdates.remove(source.key);
-      }
+      await ComicSourceManager().updateSource(source, cancelToken: cancelToken);
     } catch (e) {
-      if (cancel) return;
-      controller?.close();
-      if (showLoading) {
+      if (!showLoading) rethrow;
+      if (cancelToken?.isCancelled != true) {
         App.rootContext.showMessage(message: e.toString());
-      } else {
-        rethrow;
       }
+      return;
+    } finally {
+      controller?.close();
     }
-    await ComicSourceManager().reload();
     if (showLoading) {
       App.forceRebuild();
     }
@@ -344,7 +321,8 @@ class _ComicSourceList extends StatefulWidget {
 class _ComicSourceListState extends State<_ComicSourceList> {
   List? json;
   bool changed = false;
-  var controller = TextEditingController();
+  final controller = TextEditingController();
+  int _requestId = 0;
 
   /// The url which actually served the current list. Mirrors are tried when
   /// the configured url is unreachable, and sources must be downloaded from
@@ -352,19 +330,16 @@ class _ComicSourceListState extends State<_ComicSourceList> {
   String? _effectiveUrl;
 
   void load() async {
+    final url = controller.text.trim();
+    final requestId = ++_requestId;
     setState(() {
-      json = null;
+      json = url.isEmpty ? [] : null;
       _effectiveUrl = null;
     });
-    if (controller.text.isEmpty) {
-      setState(() {
-        json = [];
-      });
-      return;
-    }
+    if (url.isEmpty) return;
     try {
-      var result = await SourceRepo.load(controller.text);
-      if (!mounted) return;
+      final result = await SourceRepo.load(url);
+      if (!mounted || requestId != _requestId) return;
       setState(() {
         json = result.data;
         _effectiveUrl = result.url;
@@ -372,14 +347,13 @@ class _ComicSourceListState extends State<_ComicSourceList> {
       if (result.switched) {
         controller.text = result.url;
         changed = true;
-        setState(() {});
         var host = Uri.tryParse(result.url)?.host ?? result.url;
         context.showMessage(
           message: "Mirror switched to @n".tlParams({"n": host}),
         );
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || requestId != _requestId) return;
       context.showMessage(message: "${"Network error".tl}: $e");
       setState(() {
         json = [];
@@ -396,11 +370,12 @@ class _ComicSourceListState extends State<_ComicSourceList> {
 
   @override
   void dispose() {
-    super.dispose();
     if (changed) {
       appdata.settings['comicSourceListUrl'] = controller.text;
       appdata.saveData();
     }
+    controller.dispose();
+    super.dispose();
   }
 
   @override
@@ -438,8 +413,13 @@ class _ComicSourceListState extends State<_ComicSourceList> {
                     border: const UnderlineInputBorder(),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12),
                   ),
-                  onChanged: (value) {
+                  onChanged: (_) {
                     changed = true;
+                    _requestId++;
+                    setState(() {
+                      json = [];
+                      _effectiveUrl = null;
+                    });
                   },
                 ).paddingHorizontal(16).paddingBottom(8),
                 Text(
@@ -481,20 +461,19 @@ class _ComicSourceListState extends State<_ComicSourceList> {
           );
         }
 
-        index--;
-
-        var key = json![index]["key"];
+        final entry = json![index - 1];
+        final listUrl = _effectiveUrl ?? controller.text;
+        var key = entry["key"];
         var action = currentKey.contains(key)
             ? const Icon(Icons.check, size: 20).paddingRight(8)
             : Button.filled(
                 child: Text("Add".tl),
                 onPressed: () async {
-                  var fileName = json![index]["fileName"];
-                  var url = json![index]["url"];
+                  var fileName = entry["fileName"];
+                  var url = entry["url"];
                   if (url == null || !(url.toString()).isURL) {
                     // Use the url which actually served the list, so switching
                     // the repository url takes effect immediately.
-                    var listUrl = _effectiveUrl ?? controller.text;
                     if (listUrl
                         .replaceFirst("https://", "")
                         .replaceFirst("http://", "")
@@ -507,17 +486,17 @@ class _ComicSourceListState extends State<_ComicSourceList> {
                     }
                   }
                   await widget.onAdd(url);
-                  setState(() {});
+                  if (mounted) setState(() {});
                 },
               ).fixHeight(32);
 
-        var description = json![index]["version"];
-        if (json![index]["description"] != null) {
-          description = "$description\n${json![index]["description"]}";
+        var description = entry["version"];
+        if (entry["description"] != null) {
+          description = "$description\n${entry["description"]}";
         }
 
         return ListTile(
-          title: Text(json![index]["name"]),
+          title: Text(entry["name"]),
           subtitle: Text(description),
           trailing: action,
         );

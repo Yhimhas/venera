@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:venera/network/app_dio.dart';
+import 'package:venera/network/proxy.dart';
 
 /// A loaded comic source repository index.
 class SourceRepoIndex {
@@ -167,23 +168,38 @@ class SourceRepo {
   ///
   /// Used for source scripts: they are big enough that racing every mirror
   /// would waste traffic, and the first candidate is usually the cached one.
-  static Future<String> fetchText(String url) async {
+  static Future<String> fetchText(
+    String url, {
+    String? sourceKey,
+    CancelToken? cancelToken,
+  }) async {
     final urls = candidates(url);
     Object? lastError;
     for (final u in urls) {
       try {
-        return await _getTextExact(u);
+        return await _getTextExact(
+          u,
+          sourceKey: sourceKey,
+          cancelToken: cancelToken,
+        );
       } catch (e) {
+        if (cancelToken?.cancelError case final error?) throw error;
         lastError = e;
       }
     }
     throw lastError ?? Exception("Network error");
   }
 
-  static Future<String> _getTextExact(String url) async {
+  static Future<String> _getTextExact(
+    String url, {
+    String? sourceKey,
+    CancelToken? cancelToken,
+  }) async {
     final res = await AppDio().get<String>(
       url,
+      cancelToken: cancelToken,
       options: Options(
+        extra: sourceKey == null ? null : {proxySourceKey: sourceKey},
         responseType: ResponseType.plain,
         headers: {"cache-time": "no"},
         connectTimeout: const Duration(seconds: 10),
