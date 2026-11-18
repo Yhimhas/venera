@@ -108,31 +108,14 @@ class LocalComic with HistoryMixin implements Comic {
   int? get maxPage => null;
 
   void read() {
-    var history = HistoryManager().find(id, comicType);
+    final history = HistoryManager().find(id, comicType);
+    final chapters = this.chapters;
     int? firstDownloadedChapter;
-    int? firstDownloadedChapterGroup;
-    if (downloadedChapters.isNotEmpty && chapters != null) {
-      final chapters = this.chapters!;
-      if (chapters.isGrouped) {
-        for (int i=0; i<chapters.groupCount; i++) {
-          var group = chapters.getGroupByIndex(i);
-          var keys = group.keys.toList();
-          for (int j=0; j<keys.length; j++) {
-            var chapterId = keys[j];
-            if (downloadedChapters.contains(chapterId)) {
-              firstDownloadedChapter = j + 1;
-              firstDownloadedChapterGroup = i + 1;
-              break;
-            }
-          }
-        }
-      } else {
-        var keys = chapters.allChapters.keys;
-        for (int i = 0; i < keys.length; i++) {
-          if (downloadedChapters.contains(keys.elementAt(i))) {
-            firstDownloadedChapter = i + 1;
-            break;
-          }
+    if (history == null && chapters != null && downloadedChapters.isNotEmpty) {
+      for (final (index, chapterId) in chapters.ids.indexed) {
+        if (downloadedChapters.contains(chapterId)) {
+          firstDownloadedChapter = index + 1;
+          break;
         }
       }
     }
@@ -144,7 +127,7 @@ class LocalComic with HistoryMixin implements Comic {
         chapters: chapters,
         initialChapter: history?.ep ?? firstDownloadedChapter,
         initialPage: history?.page,
-        initialChapterGroup: history?.group ?? firstDownloadedChapterGroup,
+        initialChapterGroup: history?.group,
         history: history ??
             History.fromModel(
               model: this,
