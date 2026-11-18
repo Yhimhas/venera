@@ -13,7 +13,14 @@ import 'package:venera/foundation/image_provider/history_image_provider.dart';
 import 'package:venera/foundation/res.dart';
 
 void main() {
+  String? asyncSkipReason;
   if (Platform.isLinux) {
+    try {
+      DynamicLibrary.open('libsqlite3.so');
+    } on ArgumentError {
+      asyncSkipReason =
+          'SQLite default library is unavailable to worker isolates';
+    }
     open.overrideFor(OperatingSystem.linux, () {
       try {
         return DynamicLibrary.open('libsqlite3.so');
@@ -44,8 +51,8 @@ void main() {
       final previousManager = HistoryManager.cache;
       manager = HistoryManager.create();
       HistoryManager.cache = manager;
-      addTearDown(() {
-        if (manager.isInitialized) manager.close();
+      addTearDown(() async {
+        await manager.close();
         HistoryManager.cache = previousManager;
       });
     });
@@ -70,7 +77,7 @@ void main() {
       expect(manager.find(id, firstType)?.page, 4);
       expect(manager.find(id, secondType)?.page, 8);
 
-      manager.close();
+      await manager.close();
       await manager.init();
       expect(manager.getAll(), hasLength(2));
       expect(manager.find(id, firstType)?.page, 4);
@@ -136,7 +143,7 @@ void main() {
       await manager.init();
       manager.addHistory(progress(firstType, 4));
       expect(manager.find(id, firstType)?.page, 4);
-      manager.close();
+      await manager.close();
 
       final imported = sqlite3.open(dbPath);
       try {
@@ -146,6 +153,108 @@ void main() {
       }
       await manager.init();
       expect(manager.find(id, firstType)?.page, 9);
+    });
+
+    group('async progress', skip: asyncSkipReason, () {
+      test(
+        'keeps existing metadata when a reader saves an older snapshot',
+        () async {
+          await manager.init();
+          final reader = progress(firstType, 4)..cover = 'old.png';
+          manager.addHistory(reader);
+          manager.addHistory(
+            progress(firstType, 4)
+              ..title = 'Refreshed title'
+              ..subtitle = 'Refreshed subtitle'
+              ..cover = 'new.png',
+          );
+
+          await manager.addHistoryAsync(
+            reader
+              ..page = 9
+              ..ep = 3
+              ..group = 2
+              ..maxPage = 30
+              ..readEpisode.add('2-3')
+              ..time = DateTime.fromMillisecondsSinceEpoch(2000),
+          );
+
+          final saved = manager.find(id, firstType)!;
+          expect(saved.title, 'Refreshed title');
+          expect(saved.subtitle, 'Refreshed subtitle');
+          expect(saved.cover, 'new.png');
+          expect(saved.page, 9);
+          expect(saved.ep, 3);
+          expect(saved.group, 2);
+          expect(saved.maxPage, 30);
+          expect(saved.readEpisode, {'2-3'});
+          expect(saved.time.millisecondsSinceEpoch, 2000);
+          expect(manager.getAll().single.cover, 'new.png');
+        },
+      );
+
+      test('captures queued progress before the reader changes it', () async {
+        await manager.init();
+        final first = manager.addHistoryAsync(progress(firstType, 4));
+        final reader = progress(secondType, 8)..readEpisode.add('2');
+        final second = manager.addHistoryAsync(reader);
+        reader.page = 12;
+        reader.readEpisode.add('3');
+
+        await Future.wait([first, second]);
+        final saved = manager.find(id, secondType)!;
+        expect(saved.page, 8);
+        expect(saved.readEpisode, {'2'});
+        expect(manager.getAll(), hasLength(2));
+      });
+
+      test(
+        'closing finishes accepted writes before reopening the database',
+        () async {
+          await manager.init();
+          final first = manager.addHistoryAsync(progress(firstType, 4));
+          final second = manager.addHistoryAsync(progress(secondType, 8));
+          final closing = manager.close();
+          await manager.addHistoryAsync(progress(firstType, 99));
+          await closing;
+          await Future.wait([first, second]);
+          expect(manager.isInitialized, isFalse);
+
+          await manager.init();
+          expect(manager.find(id, firstType)?.page, 4);
+          expect(manager.find(id, secondType)?.page, 8);
+          await manager.addHistoryAsync(progress(secondType, 12));
+          expect(manager.find(id, secondType)?.page, 12);
+        },
+      );
+
+      test('a failed write does not block queued writes or closing', () async {
+        await manager.init();
+        final control = sqlite3.open(dbPath);
+        try {
+          control.execute('''
+            CREATE TRIGGER fail_write BEFORE INSERT ON history WHEN NEW.page = 99
+            BEGIN SELECT RAISE(ABORT, 'test write failure'); END;
+          ''');
+        } finally {
+          control.dispose();
+        }
+
+        final failed = expectLater(
+          manager.addHistoryAsync(progress(firstType, 99)),
+          throwsA(
+            predicate(
+              (Object error) => error.toString().contains('test write failure'),
+            ),
+          ),
+        );
+        final second = manager.addHistoryAsync(progress(firstType, 8));
+        await manager.close().timeout(const Duration(seconds: 5));
+        await failed;
+        await second;
+        await manager.init();
+        expect(manager.find(id, firstType)?.page, 8);
+      });
     });
 
     group('metadata refresh', () {
@@ -213,7 +322,7 @@ void main() {
 
       test('does not update records in a reopened database', () async {
         final refreshing = manager.refreshHistoryInfo(manager.getAll().single);
-        manager.close();
+        await manager.close();
         await manager.init();
         manager.addHistory(progress(type, 12)..title = 'Imported title');
         finishRefresh();

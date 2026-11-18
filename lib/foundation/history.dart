@@ -187,6 +187,8 @@ class HistoryManager with ChangeNotifier {
       cache == null ? (cache = HistoryManager.create()) : cache!;
 
   late Database _db;
+  Future<void> _pendingWrites = Future.value();
+  Future<void>? _closing;
 
   int get length => _db.select("select count(*) from history;").first[0] as int;
 
@@ -196,6 +198,8 @@ class HistoryManager with ChangeNotifier {
   bool isInitialized = false;
 
   Future<void> init() async {
+    final closing = _closing;
+    if (closing != null) await closing;
     if (isInitialized) {
       return;
     }
@@ -261,56 +265,65 @@ class HistoryManager with ChangeNotifier {
     }
   }
 
-  static const _insertHistorySql = '''
-    INSERT OR REPLACE INTO history ($_historyColumns, chapter_group)
+  static const _historyValuesSql = '''
+    INTO history ($_historyColumns, chapter_group)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ''';
+  static const _insertHistorySql = 'INSERT OR REPLACE $_historyValuesSql';
+  static const _saveProgressSql = '''
+    INSERT $_historyValuesSql
+    ON CONFLICT(id, type) DO UPDATE SET
+      time = excluded.time,
+      ep = excluded.ep,
+      page = excluded.page,
+      readEpisode = excluded.readEpisode,
+      max_page = excluded.max_page,
+      chapter_group = excluded.chapter_group
+  ''';
 
-  static Future<void> _addHistoryAsync(int dbAddr, History newItem) {
+  static Future<void> _saveProgress(int dbAddr, List<Object?> values) {
     return Isolate.run(() {
       final db = sqlite3.fromPointer(ffi.Pointer.fromAddress(dbAddr));
-      _writeHistory(db, newItem);
+      db.execute(_saveProgressSql, values);
     });
   }
 
-  bool _haveAsyncTask = false;
-
-  /// Create a isolate to add history to prevent blocking the UI thread.
-  Future<void> addHistoryAsync(History newItem) async {
-    while (_haveAsyncTask) {
-      await Future.delayed(Duration(milliseconds: 20));
-    }
-
-    _haveAsyncTask = true;
-    try {
-      await _addHistoryAsync(_db.handle.address, newItem);
-      _rememberHistory(newItem);
-    } finally {
-      _haveAsyncTask = false;
-    }
+  /// Saves a snapshot of reading progress without replacing existing metadata.
+  Future<void> addHistoryAsync(History newItem) {
+    if (!isInitialized || _closing != null) return Future.value();
+    final database = _db;
+    final key = ComicID(newItem.type, newItem.id);
+    final values = _historyValues(newItem);
+    final write = _pendingWrites.then((_) async {
+      await _saveProgress(database.handle.address, values);
+      if (!_isOpenDatabase(database)) return;
+      final saved = _readStoredHistory(key);
+      if (saved != null) _rememberHistory(saved);
+    });
+    // Report a failure to its caller without blocking later writes or close.
+    _pendingWrites = write.catchError((Object _) {});
+    return write;
   }
 
-  /// Add or update the reading progress for this comic.
+  /// Add or update a complete history record.
   void addHistory(History newItem) {
-    _writeHistory(_db, newItem);
+    _db.execute(_insertHistorySql, _historyValues(newItem));
     _rememberHistory(newItem);
   }
 
-  static void _writeHistory(Database db, History newItem) {
-    db.execute(_insertHistorySql, [
-      newItem.id,
-      newItem.title,
-      newItem.subtitle,
-      newItem.cover,
-      newItem.time.millisecondsSinceEpoch,
-      newItem.type.value,
-      newItem.ep,
-      newItem.page,
-      newItem.readEpisode.join(','),
-      newItem.maxPage,
-      newItem.group,
-    ]);
-  }
+  static List<Object?> _historyValues(History newItem) => [
+    newItem.id,
+    newItem.title,
+    newItem.subtitle,
+    newItem.cover,
+    newItem.time.millisecondsSinceEpoch,
+    newItem.type.value,
+    newItem.ep,
+    newItem.page,
+    newItem.readEpisode.join(','),
+    newItem.maxPage,
+    newItem.group,
+  ];
 
   void _rememberHistory(History item) {
     final key = ComicID(item.type, item.id);
@@ -382,10 +395,13 @@ void clearUnfavoritedHistory() {
     }
     final recent = _recentHistories[key];
     if (recent != null) return recent;
+    return _readStoredHistory(key);
+  }
 
+  History? _readStoredHistory(ComicID key) {
     final rows = _db.select(
       'SELECT * FROM history WHERE id = ? AND type = ?',
-      [id, type.value],
+      [key.id, key.type.value],
     );
     return rows.isEmpty ? null : History.fromRow(rows.first);
   }
@@ -416,12 +432,22 @@ void clearUnfavoritedHistory() {
     return res.first[0] as int;
   }
 
-  void close() {
-    if (!isInitialized) return;
-    isInitialized = false;
-    _cachedHistoryKeys = null;
-    _recentHistories.clear();
-    _db.dispose();
+  Future<void> close() {
+    final closing = _closing;
+    if (closing != null) return closing;
+    if (!isInitialized) return Future.value();
+
+    // Background isolates borrow the SQLite handle until their writes finish.
+    final closed = _pendingWrites
+        .then((_) {
+          _db.dispose();
+          isInitialized = false;
+          _cachedHistoryKeys = null;
+          _recentHistories.clear();
+        })
+        .whenComplete(() => _closing = null);
+    _closing = closed;
+    return closed;
   }
 
   void batchDeleteHistories(List<ComicID> histories) {
@@ -506,7 +532,7 @@ void clearUnfavoritedHistory() {
   }
 
   bool _isOpenDatabase(Database database) =>
-      isInitialized && identical(_db, database);
+      isInitialized && _closing == null && identical(_db, database);
 
   void _notifyMetadataUpdated(History history) {
     _recentHistories.remove(ComicID(history.type, history.id));

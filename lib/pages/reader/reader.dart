@@ -362,9 +362,13 @@ class _ReaderState extends State<Reader>
       }
       history!.time = DateTime.now();
       _updateHistoryTimer?.cancel();
-      _updateHistoryTimer = Timer(const Duration(seconds: 1), () {
-        HistoryManager().addHistoryAsync(history!);
+      _updateHistoryTimer = Timer(const Duration(seconds: 1), () async {
         _updateHistoryTimer = null;
+        try {
+          await HistoryManager().addHistoryAsync(history!);
+        } catch (error, stack) {
+          Log.error('History', 'Failed to save reading progress: $error', stack);
+        }
       });
     }
   }
