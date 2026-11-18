@@ -290,7 +290,7 @@ class ComicSource {
     }
     await file.writeAsString(jsonEncode(data));
     _isSaving = false;
-    DataSync().uploadData();
+    DataSync().onDataChanged(requireAutoSync: false);
   }
 
   Future<bool> reLogin() async {
