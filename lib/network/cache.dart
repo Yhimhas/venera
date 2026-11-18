@@ -95,7 +95,11 @@ class NetworkCacheManager extends Interceptor {
     var canReuse =
         age < const Duration(seconds: 5) ||
         (cacheTime == 'long' && age < const Duration(hours: 6));
-    if (!canReuse && age < const Duration(hours: 2)) {
+    final hasValidator = const ['etag', 'last-modified'].any(
+      (name) =>
+          cache.responseHeaders[name]?.firstOrNull?.trim().isNotEmpty == true,
+    );
+    if (!canReuse && hasValidator && age < const Duration(hours: 2)) {
       final head = options.copyWith(
         method: 'HEAD',
         responseType: ResponseType.plain,
@@ -176,10 +180,8 @@ class NetworkCacheManager extends Interceptor {
   void onResponse(
       Response<dynamic> response, ResponseInterceptorHandler handler) {
     if (response.requestOptions.method != "GET" ||
-        response.requestOptions.extra[_cacheDirectiveKey] == 'no') {
-      return handler.next(response);
-    }
-    if (response.statusCode != null && response.statusCode! >= 400) {
+        response.requestOptions.extra[_cacheDirectiveKey] == 'no' ||
+        response.statusCode != 200) {
       return handler.next(response);
     }
     var size = _calculateSize(response.data);
