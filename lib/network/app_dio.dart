@@ -274,8 +274,8 @@ class RHttpAdapter implements HttpClientAdapter {
         );
     _clients[key] = future;
     if (_clients.length > _maxClients) {
-      // rhttp releases native references when collected. An evicted client
-      // may still be in use by a request that already selected it.
+      // Drop only the cache reference. A request may still be starting or
+      // streaming with this client. rhttp releases it when it is collected.
       _clients.remove(_clients.keys.first);
     }
     try {
