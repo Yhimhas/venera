@@ -190,11 +190,8 @@ class HistoryManager with ChangeNotifier {
 
   int get length => _db.select("select count(*) from history;").first[0] as int;
 
-  /// Cache of history ids. Improve the performance of find operation.
-  Map<String, bool>? _cachedHistoryIds;
-
-  /// Cache records recently modified by the app. Improve the performance of listeners.
-  final cachedHistories = <String, History>{};
+  Set<ComicID>? _cachedHistoryKeys;
+  final _recentHistories = <ComicID, History>{};
 
   bool isInitialized = false;
 
@@ -203,54 +200,76 @@ class HistoryManager with ChangeNotifier {
       return;
     }
     _db = sqlite3.open("${App.dataPath}/history.db");
-
-    _db.execute("""
-        create table if not exists history  (
-          id text primary key,
-          title text,
-          subtitle text,
-          cover text,
-          time int,
-          type int,
-          ep int,
-          page int,
-          readEpisode text,
-          max_page int,
-          chapter_group int
-        );
-      """);
-
-    var columns = _db.select("PRAGMA table_info(history);");
-    if (!columns.any((element) => element["name"] == "chapter_group")) {
-      _db.execute("alter table history add column chapter_group int;");
+    try {
+      _initHistoryTable();
+      ImageFavoriteManager().init();
+    } catch (_) {
+      _db.dispose();
+      rethrow;
     }
-
-    notifyListeners();
-    ImageFavoriteManager().init();
     isInitialized = true;
+    notifyListeners();
   }
 
-  static const _insertHistorySql = """
-        insert or replace into history (id, title, subtitle, cover, time, type, ep, page, readEpisode, max_page, chapter_group)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-      """;
+  static const _historyTableDefinition = '''
+    (
+      id text,
+      title text,
+      subtitle text,
+      cover text,
+      time int,
+      type int,
+      ep int,
+      page int,
+      readEpisode text,
+      max_page int,
+      chapter_group int,
+      primary key (id, type)
+    )
+  ''';
+
+  static const _historyColumns =
+      'id, title, subtitle, cover, time, type, ep, page, readEpisode, max_page';
+
+  void _initHistoryTable() {
+    _db.execute('BEGIN IMMEDIATE');
+    try {
+      _db.execute('CREATE TABLE IF NOT EXISTS history $_historyTableDefinition');
+      final columns = _db.select('PRAGMA table_info(history)');
+      final primaryKey = {
+        for (final column in columns)
+          if ((column['pk'] as int) > 0) column['name'],
+      };
+      final hasChapterGroup = columns.any((c) => c['name'] == 'chapter_group');
+      if (primaryKey.length != 2 || !primaryKey.containsAll({'id', 'type'})) {
+        // Older versions used id alone, which could overwrite another source.
+        _db.execute('CREATE TABLE history_upgrade $_historyTableDefinition');
+        _db.execute('''
+          INSERT INTO history_upgrade ($_historyColumns, chapter_group)
+          SELECT $_historyColumns, ${hasChapterGroup ? 'chapter_group' : 'NULL'}
+          FROM history
+        ''');
+        _db.execute('DROP TABLE history');
+        _db.execute('ALTER TABLE history_upgrade RENAME TO history');
+      } else if (!hasChapterGroup) {
+        _db.execute('ALTER TABLE history ADD COLUMN chapter_group INT');
+      }
+      _db.execute('COMMIT');
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      rethrow;
+    }
+  }
+
+  static const _insertHistorySql = '''
+    INSERT OR REPLACE INTO history ($_historyColumns, chapter_group)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ''';
 
   static Future<void> _addHistoryAsync(int dbAddr, History newItem) {
     return Isolate.run(() {
-      var db = sqlite3.fromPointer(ffi.Pointer.fromAddress(dbAddr));
-      db.execute(_insertHistorySql, [
-        newItem.id,
-        newItem.title,
-        newItem.subtitle,
-        newItem.cover,
-        newItem.time.millisecondsSinceEpoch,
-        newItem.type.value,
-        newItem.ep,
-        newItem.page,
-        newItem.readEpisode.join(','),
-        newItem.maxPage,
-        newItem.group
-      ]);
+      final db = sqlite3.fromPointer(ffi.Pointer.fromAddress(dbAddr));
+      _writeHistory(db, newItem);
     });
   }
 
@@ -263,25 +282,22 @@ class HistoryManager with ChangeNotifier {
     }
 
     _haveAsyncTask = true;
-    await _addHistoryAsync(_db.handle.address, newItem);
-    _haveAsyncTask = false;
-    if (_cachedHistoryIds == null) {
-      updateCache();
-    } else {
-      _cachedHistoryIds![newItem.id] = true;
+    try {
+      await _addHistoryAsync(_db.handle.address, newItem);
+      _rememberHistory(newItem);
+    } finally {
+      _haveAsyncTask = false;
     }
-    cachedHistories[newItem.id] = newItem;
-    if (cachedHistories.length > 10) {
-      cachedHistories.remove(cachedHistories.keys.first);
-    }
-    notifyListeners();
   }
 
-  /// add history. if exists, update time.
-  ///
-  /// This function would be called when user start reading.
+  /// Add or update the reading progress for this comic.
   void addHistory(History newItem) {
-    _db.execute(_insertHistorySql, [
+    _writeHistory(_db, newItem);
+    _rememberHistory(newItem);
+  }
+
+  static void _writeHistory(Database db, History newItem) {
+    db.execute(_insertHistorySql, [
       newItem.id,
       newItem.title,
       newItem.subtitle,
@@ -292,23 +308,24 @@ class HistoryManager with ChangeNotifier {
       newItem.page,
       newItem.readEpisode.join(','),
       newItem.maxPage,
-      newItem.group
+      newItem.group,
     ]);
-    if (_cachedHistoryIds == null) {
-      updateCache();
-    } else {
-      _cachedHistoryIds![newItem.id] = true;
-    }
-    cachedHistories[newItem.id] = newItem;
-    if (cachedHistories.length > 10) {
-      cachedHistories.remove(cachedHistories.keys.first);
+  }
+
+  void _rememberHistory(History item) {
+    final key = ComicID(item.type, item.id);
+    _cachedHistoryKeys?.add(key);
+    _recentHistories.remove(key);
+    _recentHistories[key] = item;
+    if (_recentHistories.length > 10) {
+      _recentHistories.remove(_recentHistories.keys.first);
     }
     notifyListeners();
   }
 
   void clearHistory() {
     _db.execute("delete from history;");
-    updateCache();
+    _updateCache();
     notifyListeners();
   }
 
@@ -333,7 +350,7 @@ void clearUnfavoritedHistory() {
     _db.execute('ROLLBACK;');
     rethrow;
   }
-  updateCache();
+  _updateCache();
   notifyListeners();
 }
 
@@ -342,44 +359,35 @@ void clearUnfavoritedHistory() {
       delete from history
       where id == ? and type == ?;
     """, [id, type.value]);
-    updateCache();
+    _updateCache();
     notifyListeners();
   }
 
-  void updateCache() {
-    _cachedHistoryIds = {};
-    var res = _db.select("""
-        select id from history;
-      """);
-    for (var element in res) {
-      _cachedHistoryIds![element["id"] as String] = true;
-    }
-    for (var key in cachedHistories.keys.toList()) {
-      if (!_cachedHistoryIds!.containsKey(key)) {
-        cachedHistories.remove(key);
-      }
-    }
+  void _updateCache() {
+    final keys = {
+      for (final row in _db.select('SELECT id, type FROM history'))
+        ComicID(ComicType(row['type'] as int), row['id'] as String),
+    };
+    _cachedHistoryKeys = keys;
+    _recentHistories.removeWhere((key, _) => !keys.contains(key));
   }
 
   History? find(String id, ComicType type) {
-    if (_cachedHistoryIds == null) {
-      updateCache();
+    if (_cachedHistoryKeys == null) {
+      _updateCache();
     }
-    if (!_cachedHistoryIds!.containsKey(id)) {
+    final key = ComicID(type, id);
+    if (!_cachedHistoryKeys!.contains(key)) {
       return null;
     }
-    if (cachedHistories.containsKey(id)) {
-      return cachedHistories[id];
-    }
+    final recent = _recentHistories[key];
+    if (recent != null) return recent;
 
-    var res = _db.select("""
-      select * from history
-      where id == ? and type == ?;
-    """, [id, type.value]);
-    if (res.isEmpty) {
-      return null;
-    }
-    return History.fromRow(res.first);
+    final rows = _db.select(
+      'SELECT * FROM history WHERE id = ? AND type = ?',
+      [id, type.value],
+    );
+    return rows.isEmpty ? null : History.fromRow(rows.first);
   }
 
   List<History> getAll() {
@@ -409,7 +417,10 @@ void clearUnfavoritedHistory() {
   }
 
   void close() {
+    if (!isInitialized) return;
     isInitialized = false;
+    _cachedHistoryKeys = null;
+    _recentHistories.clear();
     _db.dispose();
   }
 
@@ -428,7 +439,7 @@ void clearUnfavoritedHistory() {
       _db.execute('ROLLBACK;');
       rethrow;
     }
-    updateCache();
+    _updateCache();
     notifyListeners();
   }
 

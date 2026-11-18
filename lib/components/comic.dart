@@ -143,7 +143,15 @@ class ComicTile extends StatelessWidget {
             .isExist(comic.id, ComicType(comic.sourceKey.hashCode))
         : false;
     var history = appdata.settings['showHistoryStatusOnTile']
-        ? HistoryManager().find(comic.id, ComicType(comic.sourceKey.hashCode))
+        ? HistoryManager().find(
+            comic.id,
+            switch (comic) {
+              History(:final type) => type,
+              FavoriteItem(:final type) => type,
+              LocalComic(:final comicType) => comicType,
+              _ => ComicType.fromKey(comic.sourceKey),
+            },
+          )
         : null;
     if (history?.page == 0) {
       history!.page = 1;
@@ -887,7 +895,7 @@ class _SliverGridComics extends StatelessWidget {
           return comic;
         }
         return AnimatedContainer(
-          key: ValueKey(comics[index].id),
+          key: ValueKey((comics[index].sourceKey, comics[index].id)),
           duration: const Duration(milliseconds: 150),
           decoration: BoxDecoration(
             color: isSelected
