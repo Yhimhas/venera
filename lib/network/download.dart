@@ -172,11 +172,15 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
 
   bool _isError = false;
 
+  int _runId = 0;
+
+  bool _isCurrent(int runId) => _isRunning && _runId == runId;
+
   String _message = "Fetching comic info...";
 
   String? _cover;
 
-  /// All images to download, key is chapter name
+  /// Complete image lists, keyed by chapter ID (empty for chapterless comics).
   Map<String, List<String>>? _images;
 
   /// Downloaded image count
@@ -196,7 +200,8 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   int get _maxConcurrentTasks =>
       (appdata.settings["downloadThreads"] as num).toInt();
 
-  void _scheduleTasks() {
+  void _scheduleTasks(int runId) {
+    if (!_isCurrent(runId)) return;
     var images = _images![_images!.keys.elementAt(_chapter)]!;
     var downloading = 0;
     for (var i = _index; i < images.length; i++) {
@@ -233,9 +238,9 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         i,
       );
       tasks[i] = task;
-      task.wait().then((task) {
-        if (task.isComplete) {
-          _scheduleTasks();
+      task.wait().then((completedTask) {
+        if (completedTask.isComplete && identical(tasks[i], completedTask)) {
+          _scheduleTasks(runId);
         }
       });
       downloading++;
@@ -245,6 +250,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   @override
   void resume() async {
     if (_isRunning) return;
+    final runId = ++_runId;
     _isError = false;
     _message = "Resuming...";
     _isRunning = true;
@@ -262,7 +268,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
           return r.data;
         }
       });
-      if (!_isRunning) {
+      if (!_isCurrent(runId)) {
         return;
       }
       if (res.error) {
@@ -283,8 +289,10 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         if (!(await dir.exists())) {
           await dir.create();
         }
+        if (!_isCurrent(runId)) return;
         path = dir.path;
       } catch (e, s) {
+        if (!_isCurrent(runId)) return;
         Log.error("Download", e.toString(), s);
         _setError("Error: $e");
         return;
@@ -292,6 +300,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
     }
 
     await LocalManager().saveCurrentDownloadingTasks();
+    if (!_isCurrent(runId)) return;
 
     if (_cover == null) {
       _message = "Downloading cover...";
@@ -304,6 +313,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
             data = progress.imageBytes;
           }
         }
+        if (!_isCurrent(runId)) return null;
         if (data == null) {
           throw "Failed to download cover";
         }
@@ -312,6 +322,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         file.writeAsBytesSync(data);
         return "file://${file.path}";
       });
+      if (!_isCurrent(runId)) return;
       if (res.error) {
         Log.error("Download", res.errorMessage!);
         _setError("Error: ${res.errorMessage}");
@@ -321,81 +332,50 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         notifyListeners();
       }
       await LocalManager().saveCurrentDownloadingTasks();
+      if (!_isCurrent(runId)) return;
     }
 
     if (_images == null) {
-      if (comic!.chapters == null) {
-        _message = "Fetching image list...";
+      final chapterIds = _selectedChapterIds.toList();
+      final images = <String, List<String>>{};
+      var totalCount = 0;
+      for (final chapterId in chapterIds) {
+        _message = chapterId == null
+            ? "Fetching image list..."
+            : "Fetching image list (${images.length}/${chapterIds.length})...";
         notifyListeners();
-        var res = await _runWithRetry(() async {
-          var r = await source.loadComicPages!(comicId, null);
-          if (r.error) {
-            throw r.errorMessage!;
-          } else {
-            return r.data;
-          }
+        if (!_isCurrent(runId)) return;
+        final res = await _runWithRetry(() async {
+          final result = await source.loadComicPages!(comicId, chapterId);
+          if (result.error) throw result.errorMessage!;
+          return result.data;
         });
-        if (!_isRunning) {
-          return;
-        }
+        if (!_isCurrent(runId)) return;
         if (res.error) {
           Log.error("Download", res.errorMessage!);
           _setError("Error: ${res.errorMessage}");
           return;
-        } else {
-          _images = {'': res.data};
-          _totalCount = _images!['']!.length;
         }
-      } else {
-        _images = {};
-        _totalCount = 0;
-        int cpCount = 0;
-        int totalCpCount =
-            chapters?.length ?? comic!.chapters!.allChapters.length;
-        for (var i in comic!.chapters!.allChapters.keys) {
-          if (chapters != null && !chapters!.contains(i)) {
-            continue;
-          }
-          if (_images![i] != null) {
-            _totalCount += _images![i]!.length;
-            continue;
-          }
-          _message = "Fetching image list ($cpCount/$totalCpCount)...";
-          notifyListeners();
-          var res = await _runWithRetry(() async {
-            var r = await source.loadComicPages!(comicId, i);
-            if (r.error) {
-              throw r.errorMessage!;
-            } else {
-              return r.data;
-            }
-          });
-          if (!_isRunning) {
-            return;
-          }
-          if (res.error) {
-            Log.error("Download", res.errorMessage!);
-            _setError("Error: ${res.errorMessage}");
-            return;
-          } else {
-            _images![i] = res.data;
-            _totalCount += _images![i]!.length;
-          }
-        }
+        final pages = res.data;
+        images[chapterId ?? ''] = pages;
+        totalCount += pages.length;
       }
+      _images = images;
+      _totalCount = totalCount;
       _message = "$_downloadedCount/$_totalCount";
       notifyListeners();
       await LocalManager().saveCurrentDownloadingTasks();
+      if (!_isCurrent(runId)) return;
     }
 
     while (_chapter < _images!.length) {
       var images = _images![_images!.keys.elementAt(_chapter)]!;
       tasks.clear();
       while (_index < images.length) {
-        _scheduleTasks();
+        _scheduleTasks(runId);
         var task = tasks[_index]!;
         await task.wait();
-        if (isPaused) {
+        if (!_isCurrent(runId)) {
           return;
         }
         if (task.error != null) {
@@ -407,6 +387,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
         _downloadedCount++;
         _message = "$_downloadedCount/$_totalCount";
         await LocalManager().saveCurrentDownloadingTasks();
+        if (!_isCurrent(runId)) return;
       }
       _index = 0;
       _chapter++;
@@ -435,6 +416,14 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
 
   @override
   String get title => comic?.title ?? comicTitle ?? "Loading...";
+
+  Iterable<String?> get _selectedChapterIds {
+    final comicChapters = comic?.chapters;
+    if (comicChapters == null) return const [null];
+    final ids = comicChapters.allChapters.keys;
+    final selected = chapters;
+    return selected == null ? ids : ids.where(selected.contains);
+  }
 
   @override
   Map<String, dynamic> toJson() {
@@ -469,7 +458,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       }
     }
 
-    return ImagesDownloadTask(
+    final task = ImagesDownloadTask(
       source: source,
       comicId: json["comicId"],
       comic:
@@ -477,12 +466,21 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       chapters: ListOrNull.from(json["chapters"]),
     )
       ..path = json["path"]
-      .._cover = json["cover"]
-      .._images = images
-      .._downloadedCount = json["downloadedCount"]
-      .._totalCount = json["totalCount"]
-      .._index = json["index"]
-      .._chapter = json["chapter"];
+      .._cover = json["cover"];
+    final savedImages = images;
+    // Older builds could save a partial list before fetching every chapter.
+    if (savedImages != null &&
+        task._selectedChapterIds.every(
+          (id) => savedImages.containsKey(id ?? ''),
+        )) {
+      task
+        .._images = savedImages
+        .._downloadedCount = json["downloadedCount"]
+        .._totalCount = json["totalCount"]
+        .._index = json["index"]
+        .._chapter = json["chapter"];
+    }
+    return task;
   }
 
   @override
