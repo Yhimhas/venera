@@ -19,9 +19,7 @@ import 'io.dart';
 
 class DataSync with ChangeNotifier {
   DataSync._() : _uploadOverride = null, _downloadOverride = null {
-    if (isEnabled) {
-      downloadData();
-    }
+    downloadAutomatically();
     LocalFavoritesManager().addListener(onDataChanged);
     ComicSourceManager().addListener(onDataChanged);
     if (App.isDesktop) {
@@ -42,10 +40,16 @@ class DataSync with ChangeNotifier {
   final Future<Res<bool>> Function()? _uploadOverride;
   final Future<Res<bool>> Function()? _downloadOverride;
 
-  void onDataChanged({bool requireAutoSync = true}) {
+  void onDataChanged() {
     // Restoring a backup also emits local change notifications.
-    if (!isDownloading && (!requireAutoSync || isEnabled)) {
-      unawaited(uploadData());
+    if (!isDownloading && isEnabled) {
+      unawaited(_requestTransfer(upload: true, manual: false));
+    }
+  }
+
+  void downloadAutomatically() {
+    if (isEnabled) {
+      unawaited(_requestTransfer(upload: false, manual: false));
     }
   }
 
@@ -83,19 +87,21 @@ class DataSync with ChangeNotifier {
 
   bool get isUploading => _isUploading;
 
-  Completer<Res<bool>>? _pendingUpload;
-  Completer<Res<bool>>? _pendingDownload;
+  _SyncRequest? _pendingUpload;
+  _SyncRequest? _pendingDownload;
   bool get _hasUploadToFinish => _isUploading || _pendingUpload != null;
 
   String? _lastError;
 
   String? get lastError => _lastError;
 
-  bool get isEnabled {
-    var config = appdata.settings['webdav'];
-    var autoSync = appdata.implicitData['webdavAutoSync'] ?? false;
-    return autoSync && config is List && config.isNotEmpty;
+  bool get isConfigured {
+    final config = appdata.settings['webdav'];
+    return config is List && config.isNotEmpty;
   }
+
+  bool get isEnabled =>
+      appdata.implicitData['webdavAutoSync'] == true && isConfigured;
 
   List<String>? _validateConfig() {
     var config = appdata.settings['webdav'];
@@ -111,16 +117,22 @@ class DataSync with ChangeNotifier {
     return List.from(config);
   }
 
-  Future<Res<bool>> uploadData() {
-    final request = _pendingUpload ??= Completer<Res<bool>>();
-    _startNextTransfer();
-    return request.future;
-  }
+  Future<Res<bool>> uploadData() =>
+      _requestTransfer(upload: true, manual: true);
 
-  Future<Res<bool>> downloadData() {
-    final request = _pendingDownload ??= Completer<Res<bool>>();
+  Future<Res<bool>> downloadData() =>
+      _requestTransfer(upload: false, manual: true);
+
+  Future<Res<bool>> _requestTransfer({
+    required bool upload,
+    required bool manual,
+  }) {
+    final request = upload
+        ? (_pendingUpload ??= _SyncRequest())
+        : (_pendingDownload ??= _SyncRequest());
+    if (manual) request.manual = true;
     _startNextTransfer();
-    return request.future;
+    return request.completion.future;
   }
 
   void _startNextTransfer() {
@@ -137,11 +149,16 @@ class DataSync with ChangeNotifier {
     } else {
       _pendingDownload = null;
     }
+    if (!request.manual && !isEnabled) {
+      request.completion.complete(const Res(false));
+      _startNextTransfer();
+      return;
+    }
     _isUploading = upload;
     _isDownloading = !upload;
     _lastError = null;
     notifyListeners();
-    unawaited(_finishTransfer(request, upload: upload));
+    unawaited(_finishTransfer(request.completion, upload: upload));
   }
 
   Future<void> _finishTransfer(
@@ -248,4 +265,9 @@ class DataSync with ChangeNotifier {
       await staging?.deleteIgnoreError(recursive: true);
     }
   }
+}
+
+class _SyncRequest {
+  final completion = Completer<Res<bool>>();
+  bool manual = false;
 }

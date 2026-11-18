@@ -1,10 +1,129 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/utils/data_sync.dart';
 
 void main() {
+  setUp(() {
+    final previousConfig = appdata.settings['webdav'];
+    final previousAutoSync = appdata.implicitData['webdavAutoSync'];
+    addTearDown(() {
+      appdata.settings['webdav'] = previousConfig;
+      appdata.implicitData['webdavAutoSync'] = previousAutoSync;
+    });
+    appdata.settings['webdav'] = ['https://example.invalid/dav', '', ''];
+    appdata.implicitData['webdavAutoSync'] = true;
+  });
+
+  test('saving settings with auto sync off only writes locally', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'venera-sync-test-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    App.dataPath = directory.path;
+    final previousSync = DataSync.instance;
+    addTearDown(() => DataSync.instance = previousSync);
+    final transfers = <String>[];
+    final sync = DataSync.withTransfers(
+      upload: () async {
+        transfers.add('upload');
+        return const Res(true);
+      },
+      download: () async {
+        transfers.add('download');
+        return const Res(true);
+      },
+    );
+    DataSync.instance = sync;
+    appdata.implicitData['webdavAutoSync'] = false;
+
+    await appdata.saveData();
+
+    expect(await File('${directory.path}/appdata.json').exists(), isTrue);
+    expect(transfers, isEmpty);
+    await sync.uploadData();
+    await sync.downloadData();
+    expect(transfers, ['upload', 'download']);
+
+    appdata.implicitData['webdavAutoSync'] = true;
+    await appdata.saveData();
+    expect(transfers, ['upload', 'download', 'upload']);
+  });
+
+  test('disabling auto sync skips uploads still in the queue', () async {
+    final uploaded = Completer<Res<bool>>();
+    var uploads = 0;
+    final sync = DataSync.withTransfers(
+      upload: () {
+        uploads++;
+        return uploaded.future;
+      },
+      download: () async => const Res(true),
+    );
+
+    final active = sync.uploadData();
+    sync.onDataChanged();
+    appdata.implicitData['webdavAutoSync'] = false;
+    uploaded.complete(const Res(true));
+    await active;
+
+    expect(uploads, 1);
+    expect(sync.isUploading, isFalse);
+  });
+
+  test('automatic downloads respect the switch after waiting', () async {
+    final uploaded = Completer<Res<bool>>();
+    var downloads = 0;
+    final sync = DataSync.withTransfers(
+      upload: () => uploaded.future,
+      download: () async {
+        downloads++;
+        return const Res(true);
+      },
+    );
+
+    appdata.implicitData['webdavAutoSync'] = false;
+    sync.downloadAutomatically();
+    expect(downloads, 0);
+    expect(sync.isConfigured, isTrue);
+
+    appdata.implicitData['webdavAutoSync'] = true;
+    final upload = sync.uploadData();
+    sync.downloadAutomatically();
+    appdata.implicitData['webdavAutoSync'] = false;
+    uploaded.complete(const Res(true));
+    await upload;
+
+    expect(downloads, 0);
+    expect(sync.isDownloading, isFalse);
+  });
+
+  test('a queued manual download survives disabling auto sync', () async {
+    final uploaded = Completer<Res<bool>>();
+    var downloads = 0;
+    final sync = DataSync.withTransfers(
+      upload: () => uploaded.future,
+      download: () async {
+        downloads++;
+        return const Res(true);
+      },
+    );
+
+    final upload = sync.uploadData();
+    sync.downloadAutomatically();
+    final manualDownload = sync.downloadData();
+    appdata.implicitData['webdavAutoSync'] = false;
+    uploaded.complete(const Res(true));
+    await upload;
+
+    expect((await manualDownload).data, isTrue);
+    expect(downloads, 1);
+  });
+
   test('publishes later changes before a waiting download', () async {
     final firstUpload = Completer<Res<bool>>();
     final nextUpload = Completer<Res<bool>>();
@@ -30,7 +149,7 @@ void main() {
     final first = sync.uploadData();
     final download = sync.downloadData();
     revision = 2;
-    sync.onDataChanged(requireAutoSync: false);
+    sync.onDataChanged();
     final second = sync.uploadData();
     revision = 3;
     final third = sync.uploadData();
@@ -89,7 +208,7 @@ void main() {
     );
 
     final download = sync.downloadData();
-    sync.onDataChanged(requireAutoSync: false);
+    sync.onDataChanged();
     downloaded.complete(const Res(true));
     await download;
 

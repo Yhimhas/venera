@@ -3,6 +3,7 @@ import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -92,6 +93,7 @@ class _SyncDataWidgetState extends State<_SyncDataWidget>
   void initState() {
     super.initState();
     DataSync().addListener(update);
+    appdata.settings.addListener(update);
     WidgetsBinding.instance.addObserver(this);
     lastCheck = DateTime.now();
   }
@@ -106,6 +108,7 @@ class _SyncDataWidgetState extends State<_SyncDataWidget>
   void dispose() {
     super.dispose();
     DataSync().removeListener(update);
+    appdata.settings.removeListener(update);
     WidgetsBinding.instance.removeObserver(this);
   }
 
@@ -117,7 +120,7 @@ class _SyncDataWidgetState extends State<_SyncDataWidget>
     if (state == AppLifecycleState.resumed) {
       if (DateTime.now().difference(lastCheck) > const Duration(minutes: 10)) {
         lastCheck = DateTime.now();
-        DataSync().downloadData();
+        DataSync().downloadAutomatically();
       }
     }
   }
@@ -125,7 +128,7 @@ class _SyncDataWidgetState extends State<_SyncDataWidget>
   @override
   Widget build(BuildContext context) {
     Widget child;
-    if (!DataSync().isEnabled) {
+    if (!DataSync().isConfigured) {
       child = const SliverPadding(padding: EdgeInsets.zero);
     } else if (DataSync().isUploading || DataSync().isDownloading) {
       child = SliverToBoxAdapter(

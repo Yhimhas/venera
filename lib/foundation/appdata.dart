@@ -52,7 +52,7 @@ class Appdata with Init {
       _isSavingData = false;
     }
     if (sync) {
-      DataSync().onDataChanged(requireAutoSync: false);
+      DataSync().onDataChanged();
     }
   }
 
