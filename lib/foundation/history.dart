@@ -443,66 +443,74 @@ void clearUnfavoritedHistory() {
     notifyListeners();
   }
 
-  /// Refresh history info from comic source.
-  /// Fetches the latest cover, title and subtitle from the source.
-  /// Keeps the reading progress (ep, page, etc.).
+  /// Refresh the title, subtitle and cover without changing reading progress.
   Future<bool> refreshHistoryInfo(History history) async {
-    if (history.sourceKey == 'local') {
-      // Local comics don't need refresh
-      return false;
-    }
+    if (!isInitialized) return false;
+    final loadComicInfo = history.type.comicSource?.loadComicInfo;
+    if (loadComicInfo == null) return false;
+    final database = _db;
 
-    return await _refreshSingleHistory(history);
-  }
-
-  /// Internal method to refresh a single history
-  /// Retries up to 3 times on failure with 2 second delay between retries
-  Future<bool> _refreshSingleHistory(History history) async {
-    var comicSource = ComicSource.find(history.sourceKey);
-    if (comicSource == null || comicSource.loadComicInfo == null) {
-      return false;
-    }
-
-    int retries = 3;
-    while (true) {
+    const attempts = 3;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      if (!_isOpenDatabase(database)) return false;
       try {
-        var res = await comicSource.loadComicInfo!(history.id);
-        if (res.error) {
-          await Future.delayed(const Duration(seconds: 2));
-          retries--;
-          if (retries == 0) {
-            return false;
-          }
-          continue;
+        final result = await loadComicInfo(history.id);
+        if (!_isOpenDatabase(database)) return false;
+        if (!result.error) {
+          final details = result.data;
+          final updated = database.select(
+            'UPDATE history SET title = ?, subtitle = ?, cover = ? '
+            'WHERE id = ? AND type = ? RETURNING id',
+            [
+              details.title,
+              details.subTitle ?? '',
+              details.cover,
+              history.id,
+              history.type.value,
+            ],
+          );
+          if (updated.isEmpty) return false;
+          _notifyMetadataUpdated(history);
+          return true;
         }
-
-        var comicDetails = res.data;
-        // Update history info while keeping reading progress
-        var updatedHistory = History.fromMap({
-          'type': history.type.value,
-          'time': history.time.millisecondsSinceEpoch,
-          'title': comicDetails.title,
-          'subtitle': comicDetails.subTitle ?? '',
-          'cover': comicDetails.cover,
-          'ep': history.ep,
-          'page': history.page,
-          'id': history.id,
-          'readEpisode': history.readEpisode.toList(),
-          'max_page': history.maxPage,
-        });
-        updatedHistory.group = history.group;
-
-        addHistory(updatedHistory);
-        return true;
-      } catch (e, s) {
-        Log.error("History", "Exception while refreshing history info: $e\n$s");
-        await Future.delayed(const Duration(seconds: 2));
-        retries--;
-        if (retries == 0) {
-          return false;
-        }
+      } catch (error, stack) {
+        Log.error('History', 'Failed to refresh history info: $error', stack);
+      }
+      if (attempt < attempts) {
+        await Future<void>.delayed(const Duration(seconds: 2));
       }
     }
+    return false;
+  }
+
+  /// Fetch a missing cover and save it only if the stored cover is still current.
+  Future<String> refreshHistoryCover(
+    History history,
+    Future<String> Function() fetchCover,
+  ) async {
+    final database = isInitialized ? _db : null;
+    final previousCover = history.cover;
+    final cover = await fetchCover();
+    if (database != null && _isOpenDatabase(database)) {
+      final updated = database.select(
+        'UPDATE history SET cover = ? '
+        'WHERE id = ? AND type = ? AND cover = ? RETURNING id',
+        [cover, history.id, history.type.value, previousCover],
+      );
+      if (updated.isNotEmpty) {
+        if (history.cover == previousCover) history.cover = cover;
+        _notifyMetadataUpdated(history);
+      }
+    }
+    return cover;
+  }
+
+  bool _isOpenDatabase(Database database) =>
+      isInitialized && identical(_db, database);
+
+  void _notifyMetadataUpdated(History history) {
+    _recentHistories.remove(ComicID(history.type, history.id));
+    notifyListeners();
   }
 
   /// Refresh all histories from comic sources.
@@ -567,7 +575,7 @@ void clearUnfavoritedHistory() {
           if (history == null) {
             break;
           }
-          var result = await _refreshSingleHistory(history);
+          var result = await refreshHistoryInfo(history);
           current++;
           if (result) {
             success++;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 
@@ -8,6 +9,8 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/foundation/image_provider/history_image_provider.dart';
+import 'package:venera/foundation/res.dart';
 
 void main() {
   if (Platform.isLinux) {
@@ -144,5 +147,145 @@ void main() {
       await manager.init();
       expect(manager.find(id, firstType)?.page, 9);
     });
+
+    group('metadata refresh', () {
+      late _DeferredSource source;
+      late ComicType type;
+
+      setUp(() async {
+        source = _DeferredSource();
+        type = ComicType.fromKey(source.key);
+        ComicSourceManager().add(source);
+        addTearDown(() => ComicSourceManager().remove(source.key));
+        await manager.init();
+        manager.addHistory(progress(type, 4));
+      });
+
+      void finishRefresh() {
+        source.response.complete(
+          Res(
+            ComicDetails.fromJson({
+              'comicId': id,
+              'sourceKey': source.key,
+              'title': 'Updated title',
+              'subtitle': 'Updated subtitle',
+              'cover': 'https://example.invalid/updated.png',
+              'tags': <String, List<String>>{},
+            }),
+          ),
+        );
+      }
+
+      test('keeps newer reading progress when the request finishes', () async {
+        final refreshing = manager.refreshHistoryInfo(manager.getAll().single);
+        manager.addHistory(
+          progress(type, 9)
+            ..ep = 3
+            ..group = 2
+            ..maxPage = 30
+            ..readEpisode.add('2-3')
+            ..time = DateTime.fromMillisecondsSinceEpoch(2000),
+        );
+        finishRefresh();
+
+        expect(await refreshing, isTrue);
+        final saved = manager.find(id, type)!;
+        expect(saved.title, 'Updated title');
+        expect(saved.subtitle, 'Updated subtitle');
+        expect(saved.cover, endsWith('updated.png'));
+        expect(saved.page, 9);
+        expect(saved.ep, 3);
+        expect(saved.group, 2);
+        expect(saved.maxPage, 30);
+        expect(saved.readEpisode, {'2-3'});
+        expect(saved.time.millisecondsSinceEpoch, 2000);
+      });
+
+      test('does not recreate a record removed during the request', () async {
+        final refreshing = manager.refreshHistoryInfo(manager.getAll().single);
+        manager.batchDeleteHistories([ComicID(type, id)]);
+        finishRefresh();
+
+        expect(await refreshing, isFalse);
+        expect(manager.getAll(), isEmpty);
+        expect(manager.find(id, type), isNull);
+      });
+
+      test('does not update records in a reopened database', () async {
+        final refreshing = manager.refreshHistoryInfo(manager.getAll().single);
+        manager.close();
+        await manager.init();
+        manager.addHistory(progress(type, 12)..title = 'Imported title');
+        finishRefresh();
+
+        expect(await refreshing, isFalse);
+        expect(manager.find(id, type)?.title, 'Imported title');
+        expect(manager.find(id, type)?.page, 12);
+      });
+
+      test(
+        'backfilling a cover keeps progress and changes the image key',
+        () async {
+          final snapshot = manager.getAll().single;
+          final oldImage = HistoryImageProvider(snapshot);
+          final oldKey = oldImage.key;
+          final pending = Completer<String>();
+          final loading = manager.refreshHistoryCover(
+            snapshot,
+            () => pending.future,
+          );
+          manager.addHistory(progress(type, 9));
+          const cover = 'https://example.invalid/cover.png';
+          pending.complete(cover);
+
+          expect(await loading, cover);
+          final saved = manager.find(id, type)!;
+          expect(saved.page, 9);
+          expect(saved.cover, cover);
+          expect(oldImage.key, oldKey);
+          expect(HistoryImageProvider(saved), isNot(oldImage));
+        },
+      );
+
+      test(
+        'a late fallback cannot replace a newer cover or restore a record',
+        () async {
+          final pending = Completer<String>();
+          final loading = manager.refreshHistoryCover(
+            manager.getAll().single,
+            () => pending.future,
+          );
+          const cover = 'https://example.invalid/current.png';
+          manager.addHistory(progress(type, 9)..cover = cover);
+          pending.complete('https://example.invalid/previous.png');
+          await loading;
+          expect(manager.find(id, type)?.cover, cover);
+
+          final deletedCover = Completer<String>();
+          final afterDeletion = manager.refreshHistoryCover(
+            manager.getAll().single,
+            () => deletedCover.future,
+          );
+          manager.batchDeleteHistories([ComicID(type, id)]);
+          deletedCover.complete('https://example.invalid/deleted.png');
+          await afterDeletion;
+          expect(manager.getAll(), isEmpty);
+        },
+      );
+    });
   });
+}
+
+class _DeferredSource implements ComicSource {
+  final response = Completer<Res<ComicDetails>>();
+
+  @override
+  String get key => 'historyRefreshFixture';
+
+  @override
+  LoadComicFunc get loadComicInfo =>
+      (_) => response.future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
