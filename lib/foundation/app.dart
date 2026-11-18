@@ -29,6 +29,7 @@ class _App {
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
   bool get isMobile => Platform.isAndroid || Platform.isIOS;
+  bool isHeadless = false;
 
   // Whether the app has been initialized.
   // If current Isolate is main Isolate, this value is always true.

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/widgets.dart';
+import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
@@ -14,7 +16,37 @@ void cliPrint(Map<String, dynamic> data) {
   print('[CLI PRINT] ${jsonEncode(data)}');
 }
 
+@visibleForTesting
+Future<int> runWebDavCommand(String? operation) async {
+  if (operation != 'up' && operation != 'down') {
+    cliPrint({
+      'status': 'error',
+      'message': 'Invalid webdav command. Use "up" or "down".',
+    });
+    return 1;
+  }
+
+  final upload = operation == 'up';
+  cliPrint({
+    'status': 'running',
+    'message': upload ? 'Uploading WebDAV data...' : 'Downloading WebDAV data...',
+  });
+  final sync = DataSync();
+  final result = upload ? await sync.uploadData() : await sync.downloadData();
+  final error = result.errorMessage;
+  if (error != null) {
+    cliPrint({'status': 'error', 'message': error});
+    return 1;
+  }
+  cliPrint({
+    'status': 'success',
+    'message': upload ? 'Upload complete.' : 'Download complete.',
+  });
+  return 0;
+}
+
 Future<void> runHeadlessMode(List<String> args) async {
+  App.isHeadless = true;
   WidgetsFlutterBinding.ensureInitialized();
   if (args.contains('--ignore-disheadless-log')) {
     Log.isMuted = true;
@@ -37,19 +69,7 @@ Future<void> runHeadlessMode(List<String> args) async {
 
   switch (command) {
     case 'webdav':
-      if (subCommand == 'up') {
-        cliPrint({'status': 'running', 'message': 'Uploading WebDAV data...'});
-        await DataSync().uploadData();
-        cliPrint({'status': 'success', 'message': 'Upload complete.'});
-      } else if (subCommand == 'down') {
-        cliPrint({'status': 'running', 'message': 'Downloading WebDAV data...'});
-        await DataSync().downloadData();
-        cliPrint({'status': 'success', 'message': 'Download complete.'});
-      } else {
-        cliPrint({'status': 'error', 'message': 'Invalid webdav command. Use "up" or "down".'});
-        exit(1);
-      }
-      break;
+      exit(await runWebDavCommand(subCommand));
     case 'updatescript':
       if (subCommand == 'all') {
         cliPrint({'status': 'running', 'message': 'Checking for comic source script updates...'});

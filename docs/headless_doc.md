@@ -23,6 +23,10 @@ Manage WebDAV data synchronization.
 - **`webdav up`**: Uploads your local configuration to the WebDAV server.
 - **`webdav down`**: Downloads and applies the remote configuration from the WebDAV server.
 
+In headless mode, WebDAV sync runs only when explicitly requested. A successful
+command exits with code `0`. Missing configuration and failed operations emit a
+final JSON message with `status` set to `error` and exit with code `1`.
+
 **Example:**
 
 ```bash

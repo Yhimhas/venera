@@ -19,6 +19,7 @@ import 'io.dart';
 
 class DataSync with ChangeNotifier {
   DataSync._() : _uploadOverride = null, _downloadOverride = null {
+    if (App.isHeadless) return;
     downloadAutomatically();
     LocalFavoritesManager().addListener(onDataChanged);
     ComicSourceManager().addListener(onDataChanged);
@@ -101,7 +102,9 @@ class DataSync with ChangeNotifier {
   }
 
   bool get isEnabled =>
-      appdata.implicitData['webdavAutoSync'] == true && isConfigured;
+      !App.isHeadless &&
+      appdata.implicitData['webdavAutoSync'] == true &&
+      isConfigured;
 
   List<String>? _validateConfig() {
     var config = appdata.settings['webdav'];
@@ -188,7 +191,7 @@ class DataSync with ChangeNotifier {
       return const Res.error('Invalid WebDAV configuration');
     }
     if (config.isEmpty) {
-      return const Res(true);
+      return const Res.error('WebDAV is not configured');
     }
     String url = config[0];
     String user = config[1];
@@ -231,7 +234,7 @@ class DataSync with ChangeNotifier {
       return const Res.error('Invalid WebDAV configuration');
     }
     if (config.isEmpty) {
-      return const Res(true);
+      return const Res.error('WebDAV is not configured');
     }
     String url = config[0];
     String user = config[1];
