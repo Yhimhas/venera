@@ -102,7 +102,7 @@ class _AppSettingsState extends State<AppSettings> {
             final controller = showLoadingDialog(context);
             File? file;
             try {
-              file = await exportAppData(false);
+              file = await exportAppData(sync: false);
               await saveFile(filename: 'data.venera', file: file);
             } catch (error, stack) {
               Log.error('Export data', error.toString(), stack);

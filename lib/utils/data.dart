@@ -16,7 +16,7 @@ import 'package:zip_flutter/zip_flutter.dart';
 
 import 'io.dart';
 
-Future<File> exportAppData([bool sync = true]) async {
+Future<File> exportAppData({bool sync = true, int? dataVersion}) async {
   final cachePath = App.cachePath;
   final dataPath = App.dataPath;
   final staging = await Directory(cachePath).createTemp('venera-export-');
@@ -24,10 +24,21 @@ Future<File> exportAppData([bool sync = true]) async {
     final historyFile = staging.joinFile('history.db');
     await HistoryManager().writeBackup(historyFile);
     final historyPath = historyFile.path;
+    var appDataFile = File(
+      FilePath.join(dataPath, sync ? 'syncdata.json' : 'appdata.json'),
+    );
+    if (dataVersion != null) {
+      final json = jsonDecode(await appDataFile.readAsString());
+      json['settings']['dataVersion'] = dataVersion;
+      appDataFile = await staging
+          .joinFile('appdata.json')
+          .writeAsString(jsonEncode(json));
+    }
+    final appDataPath = appDataFile.path;
     final archive = staging.joinFile('data.venera');
     final archivePath = archive.path;
     await Isolate.run(
-      () => _writeAppDataArchive(archivePath, historyPath, dataPath, sync),
+      () => _writeAppDataArchive(archivePath, historyPath, dataPath, appDataPath),
     );
     return await archive.rename(
       FilePath.join(cachePath, '${const Uuid().v4()}.venera'),
@@ -41,16 +52,13 @@ void _writeAppDataArchive(
   String archivePath,
   String historyPath,
   String dataPath,
-  bool sync,
+  String appDataPath,
 ) {
   final zip = ZipFile.open(archivePath);
   try {
     zip.addFile('history.db', historyPath);
     zip.addFile('local_favorite.db', FilePath.join(dataPath, 'local_favorite.db'));
-    zip.addFile(
-      'appdata.json',
-      FilePath.join(dataPath, sync ? 'syncdata.json' : 'appdata.json'),
-    );
+    zip.addFile('appdata.json', appDataPath);
     zip.addFile('cookie.db', FilePath.join(dataPath, 'cookie.db'));
     final comicSources = Directory(FilePath.join(dataPath, 'comic_source'));
     for (final file in comicSources.listSync()) {
@@ -78,7 +86,7 @@ Future<void> importAppData(File file, [bool checkVersion = false]) async {
     if (checkVersion && appdataFile.existsSync()) {
       var data = jsonDecode(await appdataFile.readAsString());
       var version = data["settings"]["dataVersion"];
-      if (version is int && version <= appdata.settings["dataVersion"]) {
+      if (version is int && version <= appdata.dataVersion) {
         return;
       }
     }

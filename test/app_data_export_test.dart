@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
@@ -81,7 +82,7 @@ void main() {
       addTearDown(live.dispose);
       expect(live.select('PRAGMA journal_mode = WAL').single[0], 'wal');
       final write = history.addHistoryAsync(progress(8));
-      final archive = await exportAppData(false);
+      final archive = await exportAppData(sync: false);
       await write;
 
       final unpacked = await extract(archive);
@@ -99,7 +100,7 @@ void main() {
 
     test('back-to-back exports produce independent archives', () async {
       final archives = await Future.wait([
-        exportAppData(false),
+        exportAppData(sync: false),
         exportAppData(),
       ]);
       expect(archives.first.path, isNot(archives.last.path));
@@ -116,6 +117,20 @@ void main() {
       expect(await Directory(App.cachePath).list().length, 2);
     });
 
+    test('the planned upload version is written only to the archive', () async {
+      const settings = '{"settings":{"dataVersion":7,"marker":"sync"}}';
+      final source = await File(
+        '${App.dataPath}/syncdata.json',
+      ).writeAsString(settings);
+      final folder = await extract(await exportAppData(dataVersion: 8));
+      final exported = jsonDecode(
+        await File('${folder.path}/appdata.json').readAsString(),
+      );
+
+      expect(exported['settings'], {'dataVersion': 8, 'marker': 'sync'});
+      expect(await source.readAsString(), settings);
+    });
+
     test('a failed archive leaves no export staging files', () async {
       final cookie = File('${App.dataPath}/cookie.db');
       await cookie.rename('${cookie.path}.unavailable');
@@ -123,7 +138,10 @@ void main() {
         '${App.cachePath}/existing.venera',
       ).writeAsString('previous export');
 
-      await expectLater(exportAppData(false), throwsA(isA<ZipException>()));
+      await expectLater(
+        exportAppData(sync: false),
+        throwsA(isA<ZipException>()),
+      );
       final remaining = await Directory(App.cachePath).list().toList();
       expect(remaining.single.path, previous.path);
       expect(await previous.readAsString(), 'previous export');

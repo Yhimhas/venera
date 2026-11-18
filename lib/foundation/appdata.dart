@@ -14,6 +14,11 @@ class Appdata with Init {
 
   final Settings settings = Settings._create();
 
+  int get dataVersion {
+    final version = settings['dataVersion'];
+    return version is int ? version : 0;
+  }
+
   var searchHistory = <String>[];
 
   bool _isSavingData = false;
