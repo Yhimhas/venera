@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:isolate';
 
 import 'package:sqlite3/sqlite3.dart';
+import 'package:uuid/uuid.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -16,32 +17,51 @@ import 'package:zip_flutter/zip_flutter.dart';
 import 'io.dart';
 
 Future<File> exportAppData([bool sync = true]) async {
-  var time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  var cacheFilePath = FilePath.join(App.cachePath, '$time.venera');
-  var cacheFile = File(cacheFilePath);
-  var dataPath = App.dataPath;
-  if (await cacheFile.exists()) {
-    await cacheFile.delete();
+  final cachePath = App.cachePath;
+  final dataPath = App.dataPath;
+  final staging = await Directory(cachePath).createTemp('venera-export-');
+  try {
+    final historyFile = staging.joinFile('history.db');
+    await HistoryManager().writeBackup(historyFile);
+    final historyPath = historyFile.path;
+    final archive = staging.joinFile('data.venera');
+    final archivePath = archive.path;
+    await Isolate.run(
+      () => _writeAppDataArchive(archivePath, historyPath, dataPath, sync),
+    );
+    return await archive.rename(
+      FilePath.join(cachePath, '${const Uuid().v4()}.venera'),
+    );
+  } finally {
+    await staging.deleteIgnoreError(recursive: true);
   }
-  await Isolate.run(() {
-    var zipFile = ZipFile.open(cacheFilePath);
-    var historyFile = FilePath.join(dataPath, "history.db");
-    var localFavoriteFile = FilePath.join(dataPath, "local_favorite.db");
-    var appdata = FilePath.join(dataPath, sync ? "syncdata.json" : "appdata.json");
-    var cookies = FilePath.join(dataPath, "cookie.db");
-    zipFile.addFile("history.db", historyFile);
-    zipFile.addFile("local_favorite.db", localFavoriteFile);
-    zipFile.addFile("appdata.json", appdata);
-    zipFile.addFile("cookie.db", cookies);
-    for (var file
-        in Directory(FilePath.join(dataPath, "comic_source")).listSync()) {
+}
+
+void _writeAppDataArchive(
+  String archivePath,
+  String historyPath,
+  String dataPath,
+  bool sync,
+) {
+  final zip = ZipFile.open(archivePath);
+  try {
+    zip.addFile('history.db', historyPath);
+    zip.addFile('local_favorite.db', FilePath.join(dataPath, 'local_favorite.db'));
+    zip.addFile(
+      'appdata.json',
+      FilePath.join(dataPath, sync ? 'syncdata.json' : 'appdata.json'),
+    );
+    zip.addFile('cookie.db', FilePath.join(dataPath, 'cookie.db'));
+    final comicSources = Directory(FilePath.join(dataPath, 'comic_source'));
+    for (final file in comicSources.listSync()) {
       if (file is File) {
-        zipFile.addFile("comic_source/${file.name}", file.path);
+        zip.addFile('comic_source/${file.name}', file.path);
       }
     }
-    zipFile.close();
-  });
-  return cacheFile;
+  } finally {
+    zip.close();
+  }
+  ZipFile.openRead(archivePath).close();
 }
 
 Future<void> importAppData(File file, [bool checkVersion = false]) async {

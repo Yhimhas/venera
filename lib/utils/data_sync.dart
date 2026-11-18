@@ -127,10 +127,11 @@ class DataSync with ChangeNotifier {
         adapter: RHttpAdapter(),
       );
 
+      File? data;
       try {
         appdata.settings['dataVersion']++;
         await appdata.saveData(false);
-        var data = await exportAppData(
+        data = await exportAppData(
             appdata.settings['disableSyncFields'].toString().isNotEmpty
         );
         var time =
@@ -150,13 +151,14 @@ class DataSync with ChangeNotifier {
           await client.remove(files.first.name!);
         }
         await client.write(filename, await data.readAsBytes());
-        data.deleteIgnoreError();
         Log.info("Upload Data", "Data uploaded successfully");
         return const Res(true);
       } catch (e, s) {
         Log.error("Upload Data", e, s);
         _lastError = e.toString();
         return Res.error(e.toString());
+      } finally {
+        await data?.deleteIgnoreError();
       }
     } finally {
       _isUploading = false;

@@ -188,7 +188,7 @@ class HistoryManager with ChangeNotifier {
       cache == null ? (cache = HistoryManager.create()) : cache!;
 
   late Database _db;
-  Future<void> _pendingWrites = Future.value();
+  Future<void> _pendingDatabaseOperations = Future.value();
   Future<void> _pendingRestores = Future.value();
   Future<void>? _closing;
 
@@ -199,13 +199,15 @@ class HistoryManager with ChangeNotifier {
 
   bool isInitialized = false;
 
+  String get _databasePath => '${App.dataPath}/history.db';
+
   Future<void> init() async {
     final closing = _closing;
     if (closing != null) await closing;
     if (isInitialized) {
       return;
     }
-    _db = sqlite3.open("${App.dataPath}/history.db");
+    _db = sqlite3.open(_databasePath);
     try {
       _initHistoryTable();
       ImageFavoriteManager().init();
@@ -299,15 +301,19 @@ class HistoryManager with ChangeNotifier {
     final database = _db;
     final key = ComicID(newItem.type, newItem.id);
     final values = _historyValues(newItem);
-    final write = _pendingWrites.then((_) async {
+    return _enqueueDatabaseOperation(() async {
       await _saveProgress(database.handle.address, values);
       if (!_isOpenDatabase(database)) return;
       final saved = _readStoredHistory(key);
       if (saved != null) _rememberHistory(saved);
     });
-    // Report a failure to its caller without blocking later writes or close.
-    _pendingWrites = write.catchError((Object _) {});
-    return write;
+  }
+
+  Future<void> _enqueueDatabaseOperation(Future<void> Function() run) {
+    final operation = _pendingDatabaseOperations.then((_) => run());
+    // Report a failure to its caller without blocking the database queue.
+    _pendingDatabaseOperations = operation.catchError((Object _) {});
+    return operation;
   }
 
   /// Add or update a complete history record.
@@ -443,7 +449,7 @@ void clearUnfavoritedHistory() {
     if (!isInitialized) return Future.value();
 
     // Background isolates borrow the SQLite handle until their writes finish.
-    final closed = _pendingWrites
+    final closed = _pendingDatabaseOperations
         .then((_) {
           _db.dispose();
           isInitialized = false;
@@ -462,7 +468,7 @@ void clearUnfavoritedHistory() {
   }
 
   Future<void> _restoreFromBackup(File backup) async {
-    final historyPath = '${App.dataPath}/history.db';
+    final historyPath = _databasePath;
     final backupUri = backup.absolute.uri.replace(
       queryParameters: {'mode': 'ro'},
     );
@@ -482,6 +488,28 @@ void clearUnfavoritedHistory() {
     } finally {
       await init();
     }
+  }
+
+  /// Creates a SQLite snapshot after all previously queued progress writes.
+  Future<void> writeBackup(File destination) async {
+    await init();
+    if (_closing != null) throw StateError('Reading history is closing');
+    final databasePath = _databasePath;
+    final backupPath = destination.absolute.path;
+    await _enqueueDatabaseOperation(
+      () => _writeBackup(databasePath, backupPath),
+    );
+  }
+
+  static Future<void> _writeBackup(String databasePath, String backupPath) {
+    return Isolate.run(() {
+      final database = sqlite3.open(databasePath, mode: OpenMode.readOnly);
+      try {
+        database.execute('VACUUM INTO ?', [backupPath]);
+      } finally {
+        database.dispose();
+      }
+    });
   }
 
   static void _restoreBackup(Database database, Uri backupUri) {
